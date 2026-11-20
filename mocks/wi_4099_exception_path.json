@@ -1,0 +1,15 @@
+{
+  "status": "validated",
+  "data": {
+    "wi_id": "WI-4099",
+    "title": "Reembolso Automático de Tarjeta de Crédito",
+    "assigned_qa": "carlos.qa@empresa.com",
+    "tfs_specification": {
+      "business_rule": "Permitir reembolsos parciales hasta por $500 USD.",
+      "ui_requirement": null,
+      "api_timeout_seconds": null
+    },
+    "meet_transcript_po_demo": "[00:01:00] grabacion_corrupta_audio_ininteligible...",
+    "git_commit_diff": null
+  }
+}
