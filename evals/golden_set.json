@@ -1,0 +1,52 @@
+{
+  "description": "Conjunto dorado del MVA: resultados esperados según los criterios de aceptación del Día 01.",
+  "plans": [
+    {
+      "wi_id": "WI-4052",
+      "expected_status": "READY_FOR_QA",
+      "min_confidence": 0.85,
+      "min_discrepancies": 3,
+      "must_cover": [
+        {
+          "name": "Trampa 1: recargo del 8.5% de Meet (no el 5% de TFS)",
+          "any_terms": ["8.5", "8,5"],
+          "grounding_sources": ["MEET_PO_DEMO"]
+        },
+        {
+          "name": "Trampa 2: día 30 exacto (>= en vez de >)",
+          "any_terms": ["30"],
+          "categories": ["edge_case", "bug_hunt"],
+          "grounding_sources": ["GIT_DIFF_DISCREPANCY"]
+        },
+        {
+          "name": "Trampa 3: bloqueo de 3 segundos del botón Pagar",
+          "any_terms": ["3 segundos", "3s", "3 s", "disablepaybutton"],
+          "categories": ["ui_visual", "bug_hunt"]
+        }
+      ]
+    },
+    {
+      "wi_id": "WI-4099",
+      "expected_status": "ESCALATE_TO_HUMAN_MISSING_DATA",
+      "max_confidence": 0.85,
+      "reason_must_mention": [["meet", "audio"], ["git", "commit"]]
+    },
+    {
+      "wi_id": "WI-9999",
+      "expected_error": "Work Item not found"
+    }
+  ],
+  "questions": [
+    {
+      "wi_id": "WI-4052",
+      "question": "¿Cuántos segundos dura la animación del spinner al pagar con Visa?",
+      "expect_found": false
+    },
+    {
+      "wi_id": "WI-4052",
+      "question": "¿Qué porcentaje de recargo por mora pidió la Product Owner?",
+      "expect_found": true,
+      "answer_terms": ["8.5", "8,5"]
+    }
+  ]
+}
