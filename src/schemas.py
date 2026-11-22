@@ -2,11 +2,15 @@
 
 - Entrada: estructura de los archivos `mocks/wi_<id>_*.json` (Nivel 0: data foundation).
 - Salida: `TestCaseItem` y `QATestPlanOutput` (no cambiar sin acuerdo del equipo).
+- Borradores del LLM (Nivel 4): cada caso y cada respuesta traen la cita textual que los
+  respalda, para verificarla contra la fuente antes de aceptarlos.
 """
 
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+CONFIDENCE_THRESHOLD = 0.85
 
 # Marcadores que indican que la transcripción de Meet no es utilizable.
 CORRUPT_TRANSCRIPT_MARKERS = ("corrupt", "ininteligible")
@@ -82,3 +86,47 @@ class QATestPlanOutput(BaseModel):
     detected_discrepancies: List[str]
     human_escalation_reason: Optional[str]
     test_cases: List[TestCaseItem]
+
+    @model_validator(mode="after")
+    def _status_coherente(self) -> "QATestPlanOutput":
+        if self.status == "ESCALATE_TO_HUMAN_MISSING_DATA":
+            if self.confidence_score >= CONFIDENCE_THRESHOLD:
+                raise ValueError(f"un escalado exige confidence_score < {CONFIDENCE_THRESHOLD}")
+            if not (self.human_escalation_reason or "").strip():
+                raise ValueError("un escalado exige human_escalation_reason")
+            if self.test_cases:
+                raise ValueError("un escalado no puede traer test_cases (no se inventan pruebas)")
+        else:  # READY_FOR_QA
+            if self.confidence_score < CONFIDENCE_THRESHOLD:
+                raise ValueError(f"READY_FOR_QA exige confidence_score >= {CONFIDENCE_THRESHOLD}")
+            if self.human_escalation_reason is not None:
+                raise ValueError("READY_FOR_QA no lleva human_escalation_reason")
+            if not self.test_cases:
+                raise ValueError("READY_FOR_QA exige al menos un caso de prueba")
+        return self
+
+
+# --- Borradores del LLM con evidencia (Nivel 4: grounding) -------------------------
+class EvidencedTestCase(TestCaseItem):
+    evidence_quote: str = Field(
+        description="Cita textual y literal, copiada de la fuente indicada en grounding_source, "
+        "que respalda then_expected. Para GIT_DIFF_DISCREPANCY se cita el git diff."
+    )
+
+
+class LLMTestPlanDraft(BaseModel):
+    """Lo que produce el LLM; el estado y la confianza los calculan reglas verificables."""
+
+    detected_discrepancies: List[str]
+    test_cases: List[EvidencedTestCase]
+
+
+class Citation(BaseModel):
+    source: Literal["TFS", "MEET_PO_DEMO", "GIT_DIFF"]
+    quote: str = Field(description="Cita textual y literal de la fuente.")
+
+
+class GroundedAnswer(BaseModel):
+    found: bool = Field(description="True solo si la respuesta está en los fragmentos.")
+    answer: str
+    citations: List[Citation]
