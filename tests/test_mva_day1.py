@@ -12,7 +12,13 @@ from pydantic import ValidationError
 
 from main_mva import INSTRUCTION_CONTRACT, PLAN_PROMPT, answer_question, generate_test_plan
 from schemas import QATestPlanOutput, TestCaseItem, WorkItemFile
-from tools_and_rag import MOCKS_DIR, fetch_tfs_and_git_data, load_meet_transcript, load_work_item
+from tools_and_rag import (
+    MOCKS_DIR,
+    fetch_tfs_and_git_data,
+    list_work_item_ids,
+    load_meet_transcript,
+    load_work_item,
+)
 
 live = pytest.mark.skipif(
     not os.getenv("ANTHROPIC_API_KEY"), reason="requiere ANTHROPIC_API_KEY para llamar al LLM"
@@ -77,6 +83,30 @@ def test_esquema_rechaza_wi_id_mal_formado():
 
 
 # --- Herramientas (datos leídos de mocks/) --------------------------------------
+def test_descubre_los_wi_desde_la_carpeta_mocks():
+    ids = list_work_item_ids()
+    assert len(ids) == len(list(MOCKS_DIR.glob("wi_*.json")))
+    assert {"WI-4052", "WI-4099"} <= set(ids)
+    assert all(load_work_item(wi_id) is not None for wi_id in ids)
+
+
+def test_descubrimiento_ignora_archivos_que_no_son_wi(tmp_path, monkeypatch):
+    import tools_and_rag
+
+    (tmp_path / "wi_7_demo.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "wi_12_demo.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "notas.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "wi_sin_numero.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(tools_and_rag, "MOCKS_DIR", tmp_path)
+    assert list_work_item_ids() == ["WI-7", "WI-12"]  # orden numérico, no alfabético
+
+
+def test_descubrimiento_sin_carpeta_mocks_devuelve_lista_vacia(tmp_path, monkeypatch):
+    import tools_and_rag
+
+    monkeypatch.setattr(tools_and_rag, "MOCKS_DIR", tmp_path / "no_existe")
+    assert list_work_item_ids() == []
+
 def test_fetch_wi_4052_devuelve_tfs_y_git():
     data = json.loads(fetch_tfs_and_git_data("WI-4052"))
     assert data["tfs_specification"]["business_rule"]

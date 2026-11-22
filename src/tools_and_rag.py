@@ -6,6 +6,8 @@ vector store local con LangChain y devolverá solo los fragmentos relevantes.
 """
 
 import json
+import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -15,6 +17,20 @@ from schemas import WorkItemData, WorkItemFile
 
 MOCKS_DIR = Path(__file__).resolve().parent.parent / "mocks"
 NOT_FOUND = {"error": "Work Item not found"}
+_MOCK_FILE_RE = re.compile(r"^wi_(\d+)_.+\.json$")
+
+
+def list_work_item_ids() -> list[str]:
+    """Descubre los WI disponibles en mocks/: `wi_4052_happy_path.json` -> `WI-4052`."""
+    mocks_dir = os.fspath(MOCKS_DIR)
+    if not os.path.isdir(mocks_dir):
+        return []
+    ids = {
+        f"WI-{match.group(1)}"
+        for name in os.listdir(mocks_dir)
+        if (match := _MOCK_FILE_RE.match(name)) and os.path.isfile(os.path.join(mocks_dir, name))
+    }
+    return sorted(ids, key=lambda wi_id: int(wi_id.removeprefix("WI-")))
 
 
 def _find_mock_file(wi_id: str) -> Optional[Path]:
