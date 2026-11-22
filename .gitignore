@@ -16,3 +16,6 @@ wheels/
 # Archivos personales (Claude Code, .env.local, etc.)
 *.local
 *.local.*
+
+# Audit trail generado en ejecución
+logs/
