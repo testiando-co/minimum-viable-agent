@@ -7,6 +7,7 @@ El modelo se elige con la variable de entorno MVA_MODEL en formato
 `proveedor:modelo` de LangChain (por defecto `anthropic:claude-opus-5-5`).
 """
 
+import argparse
 import json
 import os
 import sys
@@ -19,7 +20,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from logger import AuditTrail
 from schemas import QATestPlanOutput
-from tools_and_rag import fetch_tfs_and_git_data, load_meet_transcript
+from tools_and_rag import fetch_tfs_and_git_data, list_work_item_ids, load_meet_transcript
 
 load_dotenv()
 
@@ -142,15 +143,35 @@ def answer_question(wi_id: str, question: str, llm: Optional[BaseChatModel] = No
     return answer
 
 
-def main() -> int:
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="MVA de QA: plan de pruebas o preguntas sobre un WI.")
+    parser.add_argument(
+        "wi_ids", nargs="*", metavar="WI_ID",
+        help="Work Items a analizar (p. ej. WI-4052). Sin valor: todos los de mocks/.",
+    )
+    parser.add_argument(
+        "-q", "--pregunta",
+        help="Hace esta pregunta sobre cada WI en vez de generar el plan de pruebas.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[list[str]] = None) -> int:
     import anthropic
 
+    args = parse_args(argv)
+    wi_ids = args.wi_ids or list_work_item_ids()
+    if not wi_ids:
+        print("No hay Work Items en mocks/ (se esperan archivos wi_<id>_*.json).", file=sys.stderr)
+        return 1
+
     try:
-        for wi_id in ("WI-4052", "WI-4099", "WI-9999"):
+        for wi_id in wi_ids:
             print(f"\n=== {wi_id} ===")
-            print(json.dumps(generate_test_plan(wi_id), ensure_ascii=False, indent=2))
-        print("\n=== Pregunta adversaria (WI-4052) ===")
-        print(answer_question("WI-4052", "¿Cuántos segundos dura la animación del spinner al pagar con Visa?"))
+            if args.pregunta:
+                print(answer_question(wi_id, args.pregunta))
+            else:
+                print(json.dumps(generate_test_plan(wi_id), ensure_ascii=False, indent=2))
     except anthropic.AnthropicError as e:
         print(f"\nError al llamar al modelo ({model_name()}): {e}", file=sys.stderr)
         print("Revisa ANTHROPIC_API_KEY en tu .env (o `ant auth login`).", file=sys.stderr)

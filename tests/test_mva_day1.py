@@ -137,6 +137,39 @@ def test_pregunta_wi_9999_no_llama_al_llm():
     assert answer_question("WI-9999", "¿lo que sea?", llm=ExplodingLLM()) == "Work Item not found"
 
 
+# --- CLI (main) --------------------------------------------------------------------
+def test_main_sin_argumentos_recorre_los_wi_de_mocks(monkeypatch):
+    import main_mva
+
+    calls = []
+    monkeypatch.setattr(main_mva, "generate_test_plan", lambda wi_id: calls.append(wi_id) or {})
+    assert main_mva.main([]) == 0
+    assert calls == list_work_item_ids()
+
+
+def test_main_con_pregunta_usa_answer_question(monkeypatch):
+    import main_mva
+
+    calls = []
+    monkeypatch.setattr(main_mva, "answer_question", lambda wi_id, q: calls.append((wi_id, q)) or "ok")
+    assert main_mva.main(["WI-4052", "-q", "¿spinner?"]) == 0
+    assert calls == [("WI-4052", "¿spinner?")]
+
+
+def test_main_wi_inexistente_no_rompe(capsys):
+    import main_mva
+
+    assert main_mva.main(["WI-9999"]) == 0
+    assert "Work Item not found" in capsys.readouterr().out
+
+
+def test_main_sin_mocks_devuelve_error(monkeypatch):
+    import main_mva
+
+    monkeypatch.setattr(main_mva, "list_work_item_ids", lambda: [])
+    assert main_mva.main([]) == 1
+
+
 # --- Instruction Contract --------------------------------------------------------
 def test_prompt_incluye_las_tres_fuentes():
     rendered = PLAN_PROMPT.format(
