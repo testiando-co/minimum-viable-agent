@@ -38,3 +38,7 @@ Agente que asiste a un ingeniero de QA: analiza un Work Item (WI) a partir de 3 
 3. "¿Cuántos segundos dura el spinner al pagar con Visa?" (WI-4052) → responder que no existe en las fuentes.
 4. WI-9999 → error controlado, sin traceback.
 5. Logs muestran Recap → Reason → Verify y `pytest -v` en verde.
+
+## Progreso
+
+Estado por nivel de madurez, decisiones y pendientes: @.claude/progreso.md
