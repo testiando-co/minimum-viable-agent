@@ -127,7 +127,7 @@ def _tokenize(text: str) -> list[str]:
     return [t for t in re.findall(r"\w+(?:[.,]\w+)*", plain) if t not in _STOPWORDS]
 
 
-def _source_texts(wi: WorkItemData) -> dict[str, str]:
+def source_texts(wi: WorkItemData) -> dict[str, str]:
     """Texto indexable de cada fuente presente en el WI."""
     tfs = wi.tfs_specification.model_dump()
     texts = {"TFS": "\n".join(f"{k}: {v}" for k, v in tfs.items() if v is not None)}
@@ -171,7 +171,7 @@ def split_work_item_file(
     )
 
     documents: list[Document] = []
-    for source, text in _source_texts(wi).items():
+    for source, text in source_texts(wi).items():
         metadata = {
             "source_file": os.path.basename(path),
             "context": context or f"{wi.wi_id} — {wi.title} · {SOURCE_CONTEXT[source]}",
