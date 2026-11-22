@@ -492,14 +492,16 @@ def test_prueba2_wi_4099_escala_sin_invocar_al_llm():
 def test_prueba3_pregunta_sin_respuesta_en_las_fuentes(fake_index):
     answer = answer_question("WI-4052", "¿Cuántos segundos dura la animación del spinner al pagar con Visa?",
                              llm=FakeStructuredLLM(_good_responder))
-    assert answer.startswith("No existe en las fuentes del WI-4052")
+    assert answer.startswith("No pude verificar esa información en las fuentes del WI-4052")
+    assert "no estoy seguro de que exista" in answer
 
 
 def test_prueba3_cita_inventada_se_convierte_en_no_existe(fake_index):
     liar = FakeStructuredLLM(lambda schema, prompt: GroundedAnswer(
         found=True, answer="El spinner dura 2 segundos.",
         citations=[{"source": "MEET_PO_DEMO", "quote": "el spinner dura 2 segundos con Visa"}]))
-    assert answer_question("WI-4052", "¿spinner?", llm=liar).startswith("No existe en las fuentes")
+    answer = answer_question("WI-4052", "¿spinner?", llm=liar)
+    assert answer.startswith("No pude verificar") and "2 segundos" not in answer  # no se filtra la alucinación
 
 
 def test_respuesta_con_cita_verificada_incluye_la_fuente(fake_index):

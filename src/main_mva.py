@@ -47,6 +47,10 @@ from tools_and_rag import (
 load_dotenv()
 
 DEFAULT_MODEL = "anthropic:claude-opus-5-5"
+UNVERIFIED_ANSWER = (
+    "No pude verificar esa información en las fuentes del {wi_id} (TFS, Meet y git diff), "
+    "así que no estoy seguro de que exista."
+)
 
 # --- Instruction Contract (IC) -------------------------------------------------
 INSTRUCTION_CONTRACT = """\
@@ -69,6 +73,10 @@ Jerarquía y reglas obligatorias:
   la fuente y los casos con citas que no aparezcan se descartan.
 - Nunca uses conocimiento externo ni supongas datos: si algo no aparece en las fuentes,
   dilo explícitamente.
+- Preguntas sin verificar: si no puedes respaldar la respuesta con una cita literal de las
+  fuentes del JSON que hable exactamente de lo que se pregunta, responde que no pudiste
+  verificarla y que no estás seguro de que esa información exista. No respondas con un dato
+  parecido de otro tema (por ejemplo, otra duración u otro componente de la pantalla).
 """
 
 PLAN_PROMPT = ChatPromptTemplate.from_messages(
@@ -93,8 +101,9 @@ QUESTION_PROMPT = ChatPromptTemplate.from_messages(
             "Pregunta del ingeniero de QA sobre el {wi_id}: {question}\n\n"
             "Responde en español, solo con lo que digan estos fragmentos recuperados por RAG. "
             "Si la respuesta está, usa found=true y agrega en `citations` la fuente y una cita "
-            "literal de cada dato. Si no está en ningún fragmento, usa found=false, "
-            "citations vacía y explica que esa información no existe en las fuentes del WI.\n\n"
+            "literal de cada dato que hable exactamente de lo que se pregunta. Si no puedes "
+            "verificarlo en ningún fragmento, usa found=false, citations vacía y di que no "
+            "pudiste verificarlo y no estás seguro de que esa información exista.\n\n"
             "<fragmentos_rag>\n{fragments}\n</fragmentos_rag>",
         ),
     ]
@@ -235,11 +244,12 @@ def run_question(wi_id: str, question: str, llm: Optional[BaseChatModel] = None)
         sources = "\n".join(f"- [{c['source']}] «{c['quote']}»" for c in citations)
         answer = f"{result.answer}\n\nFuentes:\n{sources}"
     else:
-        answer = f"No existe en las fuentes del {wi_id}. {result.answer}".strip()
+        # No se agrega el texto del LLM: sin respaldo verificable podría ser una alucinación.
+        answer = UNVERIFIED_ANSWER.format(wi_id=wi_id)
     audit.step(
         "VERIFY",
         "respuesta con citas verificadas" if grounded
-        else "sin respaldo verificable: se responde que no existe en las fuentes",
+        else "sin respaldo verificable: se responde que no se pudo verificar",
     )
     details = {"found": result.found, "grounded": grounded, "citations": citations}
     audit.finish({"output": answer, "grounding": details})
@@ -247,7 +257,7 @@ def run_question(wi_id: str, question: str, llm: Optional[BaseChatModel] = None)
 
 
 def answer_question(wi_id: str, question: str, llm: Optional[BaseChatModel] = None) -> str:
-    """Respuesta con sus fuentes, o "No existe en las fuentes" si no hay respaldo verificable."""
+    """Respuesta con sus fuentes, o que no se pudo verificar si no hay respaldo verificable."""
     return run_question(wi_id, question, llm)[0]
 
 

@@ -90,7 +90,7 @@ def evaluate_question(spec: dict[str, Any], llm: Optional[BaseChatModel] = None)
     answer, details = run_question(spec["wi_id"], spec["question"], llm)
     answered = details["grounded"]
     checks = [_check(
-        "responde con citas verificadas" if spec["expect_found"] else "dice que no existe en las fuentes",
+        "responde con citas verificadas" if spec["expect_found"] else "dice que no pudo verificarlo",
         answered == spec["expect_found"], answer,
     )]
     if spec["expect_found"] and spec.get("answer_terms"):

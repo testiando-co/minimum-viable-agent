@@ -86,7 +86,8 @@ Con confianza ≥ 0.85 el plan queda `READY_FOR_QA`; si no, se escala sin casos.
 de `QATestPlanOutput` impiden planes incoherentes (p. ej. un escalado con casos de prueba).
 
 En las preguntas, una respuesta solo se acepta si todas sus citas aparecen en las fuentes; si
-no, el agente responde *"No existe en las fuentes del WI"*.
+no, el agente responde que *no pudo verificar esa información en las fuentes del WI y no está
+seguro de que exista*, sin agregar el texto no verificado del LLM.
 
 **Evaluación** (`src/evaluation.py`): corre el agente contra `evals/golden_set.json` (las 3
 trampas de WI-4052, el escalado de WI-4099, WI-9999 y dos preguntas) y reporta:
