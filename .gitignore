@@ -19,3 +19,6 @@ wheels/
 
 # Audit trail generado en ejecución
 logs/
+
+# Modelo de embeddings descargado por FastEmbed
+.cache/

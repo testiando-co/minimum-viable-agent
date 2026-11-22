@@ -24,28 +24,44 @@ certifi==2026.10.23
     #   requests
 charset-normalizer==3.5.2
     # via requests
+click==8.5.1
+    # via huggingface-hub
 colorama==0.4.6 ; sys_platform == 'win32'
-    # via pytest
+    # via
+    #   loguru
+    #   pytest
+    #   tqdm
 distro==1.9.0
     # via langsmith
 docstring-parser==0.18.0
     # via anthropic
 faiss-cpu==1.16.0
     # via minimum-viable-agent
+fastembed==0.9.1
+    # via minimum-viable-agent
+filelock==4.3.0
+    # via huggingface-hub
+flatbuffers==25.12.19
+    # via onnxruntime
 frozenlist==1.8.0
     # via
     #   aiohttp
     #   aiosignal
+fsspec==2026.9.0
+    # via huggingface-hub
 h11==0.16.0
     # via
     #   httpcore
     #   httpcore2
+hf-xet==1.8.0 ; platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'
+    # via huggingface-hub
 httpcore==1.0.9
     # via httpx
 httpcore2==2.16.2 ; sys_platform != 'emscripten'
     # via httpx2
 httpx==0.28.1
     # via
+    #   huggingface-hub
     #   langchain-core
     #   langgraph-sdk
 httpx-sse==0.4.3
@@ -56,6 +72,10 @@ httpx2==2.16.2
     #   langsmith
 httpx2-jsfetch==1.0 ; sys_platform == 'emscripten'
     # via httpx2
+huggingface-hub==1.33.0
+    # via
+    #   fastembed
+    #   tokenizers
 idna==3.20
     # via
     #   anyio
@@ -113,6 +133,10 @@ langsmith==0.15.1
     #   langchain-classic
     #   langchain-community
     #   langchain-core
+loguru==0.7.3
+    # via fastembed
+mmh3==5.3.1
+    # via fastembed
 multidict==7.2.1
     # via
     #   aiohttp
@@ -120,7 +144,12 @@ multidict==7.2.1
 numpy==2.5.5
     # via
     #   faiss-cpu
+    #   fastembed
     #   langchain-community
+    #   onnxruntime
+    #   rank-bm25
+onnxruntime==1.32.0
+    # via fastembed
 opentelemetry-api==1.45.2
     # via anthropic
 orjson==3.13.0
@@ -132,15 +161,23 @@ ormsgpack==1.13.1
 packaging==26.3
     # via
     #   faiss-cpu
+    #   huggingface-hub
     #   langchain-core
     #   langsmith
+    #   onnxruntime
     #   pytest
+pillow==13.0.0
+    # via fastembed
 pluggy==1.7.0
     # via pytest
 propcache==0.5.4
     # via
     #   aiohttp
     #   yarl
+protobuf==7.36.2
+    # via onnxruntime
+py-rust-stemmers==0.1.8
+    # via fastembed
 pydantic==2.14.4
     # via
     #   anthropic
@@ -166,11 +203,15 @@ python-dotenv==1.2.4
     #   pydantic-settings
 pyyaml==6.0.3
     # via
+    #   huggingface-hub
     #   langchain-classic
     #   langchain-community
     #   langchain-core
+rank-bm25==0.2.2
+    # via minimum-viable-agent
 requests==2.34.2
     # via
+    #   fastembed
     #   langchain-classic
     #   langchain-community
     #   langsmith
@@ -189,6 +230,12 @@ tenacity==9.2.1
     # via
     #   langchain-community
     #   langchain-core
+tokenizers==0.23.3
+    # via fastembed
+tqdm==4.70.1
+    # via
+    #   fastembed
+    #   huggingface-hub
 truststore==0.10.5 ; sys_platform != 'emscripten'
     # via
     #   httpcore2
@@ -200,6 +247,7 @@ typing-extensions==4.16.0
     #   anthropic
     #   anyio
     #   httpx2
+    #   huggingface-hub
     #   langchain-core
     #   langchain-protocol
     #   langsmith
@@ -223,6 +271,8 @@ websockets==17.4
     # via
     #   langgraph-sdk
     #   langsmith
+win32-setctime==1.2.1 ; sys_platform == 'win32'
+    # via loguru
 xxhash==4.1.0
     # via
     #   langgraph
