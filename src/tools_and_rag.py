@@ -258,8 +258,24 @@ class HybridIndex:
         return results
 
 
+def local_llm_enabled() -> bool:
+    """LOCAL_LLM=1 en .env: LLM y embeddings servidos por Ollama local."""
+    return os.getenv("LOCAL_LLM", "0").strip().lower() in ("1", "true", "yes", "si", "sí")
+
+
+def ollama_base_url() -> str:
+    return os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+
 def get_embeddings() -> Embeddings:
-    """Embeddings locales con FastEmbed (ONNX, sin API key). Modelo vía MVA_EMBEDDINGS_MODEL."""
+    """Embeddings locales: Ollama si LOCAL_LLM=1; si no, FastEmbed (ONNX, sin API key)."""
+    if local_llm_enabled():
+        from langchain_ollama import OllamaEmbeddings
+
+        return OllamaEmbeddings(
+            model=os.getenv("OLLAMA_EMBEDDINGS_MODEL", "embeddinggemma"), base_url=ollama_base_url()
+        )
+
     from langchain_community.embeddings import FastEmbedEmbeddings
 
     return FastEmbedEmbeddings(

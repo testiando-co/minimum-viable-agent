@@ -19,7 +19,7 @@ from typing import Any, Optional
 from langchain_core.language_models import BaseChatModel
 
 from grounding import normalize
-from main_mva import model_name, run_question, run_test_plan
+from main_mva import llm_errors, model_name, run_question, run_test_plan
 from schemas import QATestPlanOutput
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -137,11 +137,9 @@ def print_report(evaluation: dict[str, Any]) -> None:
 
 
 def main() -> int:
-    import anthropic
-
     try:
         evaluation = run_evaluation()
-    except anthropic.AnthropicError as e:
+    except llm_errors() as e:
         print(f"Error al llamar al modelo ({model_name()}): {e}", file=sys.stderr)
         return 1
     print_report(evaluation)

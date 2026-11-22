@@ -12,6 +12,8 @@ Bucle FCoT registrado en el Audit Trail: RECAP → REASON → VERIFY.
 
 El modelo se elige con la variable de entorno MVA_MODEL en formato
 `proveedor:modelo` de LangChain (por defecto `anthropic:claude-opus-5-5`).
+Ejemplos: `anthropic:claude-opus-5-5`, `google_genai:gemini-3.5-flash-lite`.
+Con LOCAL_LLM=1 se usa Ollama local (OLLAMA_MODEL, por defecto `gemma3`).
 """
 
 import argparse
@@ -40,6 +42,8 @@ from tools_and_rag import (
     fetch_tfs_and_git_data,
     list_work_item_ids,
     load_work_item,
+    local_llm_enabled,
+    ollama_base_url,
     search_meet_transcript_rag,
     search_work_item_rag,
 )
@@ -112,10 +116,47 @@ QUESTION_PROMPT = ChatPromptTemplate.from_messages(
 
 # --- Selección y servicio del modelo --------------------------------------------
 def model_name() -> str:
+    if local_llm_enabled():
+        return f"ollama:{os.getenv('OLLAMA_MODEL', 'gemma3')}"
     return os.getenv("MVA_MODEL", DEFAULT_MODEL)
 
 
+# Variable de entorno con la API key de cada proveedor de LangChain (prefijo de MVA_MODEL).
+PROVIDER_API_KEYS = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "google_genai": "GOOGLE_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
+
+
+def llm_available() -> bool:
+    """True si hay un LLM configurado: Ollama local o la API key del proveedor de MVA_MODEL."""
+    if local_llm_enabled():
+        return True
+    env_var = PROVIDER_API_KEYS.get(model_name().split(":", 1)[0])
+    return bool(env_var and os.getenv(env_var))
+
+
+def llm_errors() -> tuple[type[BaseException], ...]:
+    """Errores de red o de API de los proveedores soportados (para un error controlado)."""
+    import anthropic
+    import httpx
+    import ollama
+    from google.genai.errors import APIError as GoogleAPIError
+    from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
+
+    return (anthropic.AnthropicError, ollama.ResponseError, GoogleAPIError,
+            ChatGoogleGenerativeAIError, httpx.HTTPError, ConnectionError)
+
+
 def build_llm() -> BaseChatModel:
+    if local_llm_enabled():
+        from langchain_ollama import ChatOllama
+
+        return ChatOllama(
+            model=os.getenv("OLLAMA_MODEL", "gemma3"), base_url=ollama_base_url(),
+            temperature=0, num_ctx=8192,
+        )
     return init_chat_model(model_name(), max_tokens=16000)
 
 
@@ -276,8 +317,6 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    import anthropic
-
     args = parse_args(argv)
     wi_ids = args.wi_ids or list_work_item_ids()
     if not wi_ids:
@@ -293,9 +332,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                 plan = generate_test_plan(wi_id)
                 data = plan.model_dump() if isinstance(plan, BaseModel) else plan
                 print(json.dumps(data, ensure_ascii=False, indent=2))
-    except anthropic.AnthropicError as e:
+    except llm_errors() as e:
         print(f"\nError al llamar al modelo ({model_name()}): {e}", file=sys.stderr)
-        print("Revisa ANTHROPIC_API_KEY en tu .env (o `ant auth login`).", file=sys.stderr)
+        print("Revisa la API key del proveedor en tu .env, o que Ollama esté corriendo si LOCAL_LLM=1.",
+              file=sys.stderr)
         return 1
     return 0
 

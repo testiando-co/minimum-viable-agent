@@ -17,12 +17,29 @@ y genera un plan de pruebas validado con Pydantic (`QATestPlanOutput`).
 
 ```bash
 uv sync
-cp .env.example .env   # completa ANTHROPIC_API_KEY
+cp .env.example .env   # completa la API key del proveedor que vayas a usar
 ```
 
-`MVA_MODEL` elige el modelo en formato LangChain `proveedor:modelo`
-(por defecto `anthropic:claude-opus-5-5`). Para otro proveedor, instala su paquete
-(`uv add langchain-openai`, etc.) y cambia la variable.
+### Proveedor del LLM
+
+Se elige solo con `.env`:
+
+| Proveedor | Configuración en `.env` |
+|---|---|
+| Anthropic (por defecto) | `MVA_MODEL=anthropic:claude-opus-5-5` + `ANTHROPIC_API_KEY` |
+| Google Gemini | `MVA_MODEL=google_genai:gemini-3.5-flash-lite` + `GOOGLE_API_KEY` |
+| Ollama local | `LOCAL_LLM=1` + `OLLAMA_MODEL` (p. ej. `gemma4`) y `OLLAMA_EMBEDDINGS_MODEL` (p. ej. `embeddinggemma`) |
+
+Con `LOCAL_LLM=1`, Ollama también genera los embeddings del RAG; si no, se usa FastEmbed local.
+Los tests `@pytest.mark.llm` corren solo si el proveedor elegido está configurado.
+
+Resultado de las 5 pruebas de aceptación con el modelo real (`uv run pytest -v`):
+
+| Modelo | Resultado |
+|---|---|
+| `google_genai:gemini-3.5-flash-lite` | 5/5 (el plan gratuito a veces responde 503 por alta demanda) |
+| `ollama:gemma4` | 4/5 (antes de aceptar `[...]` en las citas) |
+| `ollama:gemma3` | 3/5 |
 
 ## Uso
 

@@ -1,7 +1,8 @@
 """Suite del MVA.
 
 - Tests deterministas: corren sin API key (LLM simulado y embeddings falsos).
-- Tests `@pytest.mark.llm`: llaman al LLM real. Se saltan si no hay ANTHROPIC_API_KEY.
+- Tests `@pytest.mark.llm`: llaman al LLM real (el de MVA_MODEL, u Ollama con LOCAL_LLM=1).
+  Se saltan si no hay ninguno configurado.
 """
 
 import json
@@ -21,8 +22,10 @@ from tools_and_rag import (
     load_work_item,
 )
 
+from main_mva import llm_available
+
 _needs_api_key = pytest.mark.skipif(
-    not os.getenv("ANTHROPIC_API_KEY"), reason="requiere ANTHROPIC_API_KEY para llamar al LLM"
+    not llm_available(), reason="requiere la API key del proveedor de MVA_MODEL o LOCAL_LLM=1"
 )
 
 
@@ -190,19 +193,64 @@ def test_ic_contiene_reglas_de_negocio():
 
 
 # --- Pruebas de aceptación contra el LLM real -----------------------------------
+@pytest.fixture
+def real_index():
+    """Índice con los embeddings reales (FastEmbed u Ollama), reconstruido por test."""
+    import tools_and_rag
+
+    tools_and_rag.get_index.cache_clear()
+    yield
+    tools_and_rag.get_index.cache_clear()
+
+
+def _golden_plan(wi_id):
+    golden = json.loads((ROOT / "evals" / "golden_set.json").read_text(encoding="utf-8"))
+    return next(p for p in golden["plans"] if p["wi_id"] == wi_id)
+
+
+def _failed(result):
+    return [(c["name"], c["detail"]) for c in result["checks"] if not c["passed"]]
+
+
 @live
-def test_prueba1_happy_path_wi_4052_llm_real():
+def test_prueba1_happy_path_wi_4052_llm_real(real_index):
     from evaluation import evaluate_plan
 
-    golden = json.loads((ROOT / "evals" / "golden_set.json").read_text(encoding="utf-8"))
-    result = evaluate_plan(next(p for p in golden["plans"] if p["wi_id"] == "WI-4052"))
-    assert all(c["passed"] for c in result["checks"]), result["checks"]
+    result = evaluate_plan(_golden_plan("WI-4052"))
+    assert not _failed(result), _failed(result)
 
 
 @live
-def test_prueba3_pregunta_adversaria_spinner_visa_llm_real():
+def test_prueba2_exception_path_wi_4099_llm_real(real_index):
+    from evaluation import evaluate_plan
+
+    result = evaluate_plan(_golden_plan("WI-4099"))
+    assert not _failed(result), _failed(result)
+
+
+@live
+def test_prueba3_pregunta_adversaria_spinner_visa_llm_real(real_index):
     answer = answer_question("WI-4052", "¿Cuántos segundos dura la animación del spinner al pagar con Visa?")
-    assert answer.startswith("No existe en las fuentes")
+    assert answer.startswith("No pude verificar"), answer
+
+
+@live
+def test_prueba4_wi_9999_llm_real(real_index, capsys):
+    import main_mva
+
+    assert main_mva.main(["WI-9999"]) == 0
+    assert "Work Item not found" in capsys.readouterr().out
+
+
+@live
+def test_prueba5_audit_trail_llm_real(real_index, tmp_path, monkeypatch):
+    import logger
+
+    monkeypatch.setattr(logger, "LOG_FILE", tmp_path / "audit.jsonl")
+    generate_test_plan("WI-4052")
+    record = json.loads((tmp_path / "audit.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    phases = [step["phase"] for step in record["reasoning_trace"]]
+    assert [p for i, p in enumerate(phases) if p not in phases[:i]] == ["RECAP", "REASON", "VERIFY"]
 
 
 # =================================================================================
