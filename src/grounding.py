@@ -21,10 +21,17 @@ MIN_QUOTE_CHARS = 8
 GROUNDING_TO_SOURCE = {"TFS": "TFS", "MEET_PO_DEMO": "MEET_PO_DEMO", "GIT_DIFF_DISCREPANCY": "GIT_DIFF"}
 
 
+# Marcas de tiempo de la transcripción: [00:03:10] o [03:10].
+_TIMESTAMP_RE = re.compile(r"\[\d{1,2}:\d{2}(?::\d{2})?\]")
+# Elipsis al citar: "...", "…", "[...]", "(...)".
+_ELLIPSIS_RE = re.compile(r"[\[(]\s*(?:\.\.\.|…)\s*[\])]|\.\.\.|…")
+
+
 def normalize(text: str) -> str:
-    """Minúsculas, sin tildes, sin comillas y con espacios colapsados."""
+    """Minúsculas, sin tildes, sin comillas, sin marcas de tiempo y con espacios colapsados."""
     plain = unicodedata.normalize("NFKD", text.lower())
     plain = "".join(c for c in plain if not unicodedata.combining(c))
+    plain = _TIMESTAMP_RE.sub(" ", plain)
     plain = re.sub(r"[\"'`“”‘’«»]", "", plain)
     return re.sub(r"\s+", " ", plain).strip()
 
@@ -32,10 +39,11 @@ def normalize(text: str) -> str:
 def quote_in_source(quote: str, source_text: str) -> bool:
     """True si la cita aparece literalmente en la fuente.
 
-    Se permiten elipsis ("..." o "…"): cada tramo debe aparecer, en orden.
+    Se permiten elipsis ("...", "…", "[...]", "(...)"): cada tramo debe aparecer, en orden.
+    Las marcas de tiempo [hh:mm:ss] de la transcripción no cuentan para la comparación.
     """
     haystack = normalize(source_text)
-    segments = [normalize(s) for s in re.split(r"\.\.\.|…", quote)]
+    segments = [normalize(s) for s in _ELLIPSIS_RE.split(quote)]
     segments = [s for s in segments if s]
     if not segments or sum(len(s) for s in segments) < MIN_QUOTE_CHARS:
         return False

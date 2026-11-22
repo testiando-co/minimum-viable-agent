@@ -407,6 +407,17 @@ def test_cita_literal_se_encuentra_ignorando_tildes_mayusculas_y_espacios():
     assert not quote_in_source("8.5", "8.5%")  # citas demasiado cortas no cuentan
 
 
+def test_cita_acepta_elipsis_entre_corchetes_y_omite_marcas_de_tiempo():
+    meet = load_work_item("WI-4052").meet_transcript_po_demo
+    # Casos reales de gemma4 y gemma3 que antes se descartaban por error:
+    assert quote_in_source("recargo por mora debe ser exactamente del 8.5% [...] bloquee el botón 'Pagar'", meet)
+    assert quote_in_source("para facturas mayores a 30 días. Además, aquí donde estoy compartiendo", meet)
+    assert quote_in_source("del 8.5% (...) el banner sea ROJO", meet)
+    # Siguen sin aceptarse tramos que no existen o en otro orden:
+    assert not quote_in_source("el banner sea ROJO [...] recargo por mora debe ser exactamente del 8.5%", meet)
+    assert not quote_in_source("recargo del 8.5% [...] el spinner dura 2 segundos", meet)
+
+
 def test_casos_con_citas_inventadas_se_descartan():
     report = verify_test_cases(load_work_item("WI-4052"), GOOD_CASES + [INVENTED])
     assert [c.test_id for c in report.grounded] == ["TC-01", "TC-02", "TC-03"]
