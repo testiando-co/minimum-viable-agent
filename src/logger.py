@@ -43,7 +43,11 @@ class AuditTrail:
         _log.info("[%s] %s: %s", self.trace_id, phase, detail)
 
     def tool(self, name: str, args: dict[str, Any], result: str) -> None:
-        self.record["tools"].append({"name": name, "args": args, "result_chars": len(result)})
+        try:
+            output: Any = json.loads(result)
+        except (TypeError, ValueError):
+            output = result
+        self.record["tools"].append({"name": name, "input": args, "output": output})
         _log.info("[%s] tool %s(%s) -> %d chars", self.trace_id, name, args, len(result))
 
     def finish(self, output: Any) -> None:
