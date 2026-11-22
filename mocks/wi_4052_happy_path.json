@@ -1,23 +1,23 @@
 {
-"status": "validated",
-"data": {
-"wi_id": "WI-4052",
-"title": "Validación de Recargo por Mora en Pasarela de Pagos PSE",
-"assigned_qa": "carlos.qa@empresa.com",
-"tfs_specification": {
-"business_rule": "Si la factura tiene más de 30 días de vencida, aplicar un recargo por mora del 5% sobre el subtotal.",
-"ui_requirement": "Mostrar alerta en color AMARILLO con el texto 'Factura con recargo por mora'.",
-"api_timeout_seconds": 10
-},
-"meet_transcript_po_demo": "\[00:02:15\] Product Owner (Laura): Hola equipo, estamos viendo la pantalla del checkout del WI-4052. Ojo a todos los de QA: ayer Finanzas cambió la regla legal, ya NO es el 5% de recargo que dice el ticket viejo de TFS, ahora el recargo por mora debe ser exactamente del 8.5% para facturas mayores a 30 días. \[00:03:10\] Además, aquí donde estoy compartiendo pantalla ven que el banner amarillo casi no se lee; cambiamos el diseño para que el banner sea ROJO (#FF0000) y bloquee el botón 'Pagar' durante 3 segundos mientras el usuario lee el recargo. \[00:04:00\] Dev (Andrés): Listo Laura, ya mismo subo el commit con ese ajuste antes de pasarlo a QA.",
-"git_commit_diff": {
-"commit_hash": "a8f92b1",
-"author": "andres.dev@empresa.com",
-"files_modified": \[
-"src/services/payment_surcharge.py",
-"src/ui/checkout_banner.tsx"
-\],
-"diff_summary": "--- a/src/services/payment_surcharge.py\\n+++ b/src/services/payment_surcharge.py\\n@@ -12,4 +12,4 @@\\n- SURCHARGE_RATE = 0.05\\n+ SURCHARGE_RATE = 0.085 # Actualizado según PO en Meet\\n- if days_overdue > 30:\\n+ if days_overdue >= 30: # OJO: Cambió > por >=\\n\\n--- a/src/ui/checkout_banner.tsx\\n+++ b/src/ui/checkout_banner.tsx\\n@@ -45,2 +45,2 @@\\n- \\n+  # BUG OCULTO: No activó bloqueo de 3s"
-}
-}
+  "status": "validated",
+  "data": {
+    "wi_id": "WI-4052",
+    "title": "Validación de Recargo por Mora en Pasarela de Pagos PSE",
+    "assigned_qa": "carlos.qa@empresa.com",
+    "tfs_specification": {
+      "business_rule": "Si la factura tiene más de 30 días de vencida, aplicar un recargo por mora del 5% sobre el subtotal.",
+      "ui_requirement": "Mostrar alerta en color AMARILLO con el texto 'Factura con recargo por mora'.",
+      "api_timeout_seconds": 10
+    },
+    "meet_transcript_po_demo": "[00:02:15] Product Owner (Laura): Hola equipo, estamos viendo la pantalla del checkout del WI-4052. Ojo a todos los de QA: ayer Finanzas cambió la regla legal, ya NO es el 5% de recargo que dice el ticket viejo de TFS, ahora el recargo por mora debe ser exactamente del 8.5% para facturas mayores a 30 días. [00:03:10] Además, aquí donde estoy compartiendo pantalla ven que el banner amarillo casi no se lee; cambiamos el diseño para que el banner sea ROJO (#FF0000) y bloquee el botón 'Pagar' durante 3 segundos mientras el usuario lee el recargo. [00:04:00] Dev (Andrés): Listo Laura, ya mismo subo el commit con ese ajuste antes de pasarlo a QA.",
+    "git_commit_diff": {
+      "commit_hash": "a8f92b1",
+      "author": "andres.dev@empresa.com",
+      "files_modified": [
+        "src/services/payment_surcharge.py",
+        "src/ui/checkout_banner.tsx"
+      ],
+      "diff_summary": "--- a/src/services/payment_surcharge.py\\n+++ b/src/services/payment_surcharge.py\\n@@ -12,4 +12,4 @@\\n- SURCHARGE_RATE = 0.05\\n+ SURCHARGE_RATE = 0.085 # Actualizado según PO en Meet\\n- if days_overdue > 30:\\n+ if days_overdue >= 30: # OJO: Cambió > por >=\\n\\n--- a/src/ui/checkout_banner.tsx\\n+++ b/src/ui/checkout_banner.tsx\\n@@ -45,2 +45,2 @@\\n- \\n+  # BUG OCULTO: No activó bloqueo de 3s"
+    }
+  }
 }
