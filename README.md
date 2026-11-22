@@ -10,6 +10,8 @@ y genera un plan de pruebas validado con Pydantic (`QATestPlanOutput`).
 | 0 — Data foundation | Datos curados y accesibles | `mocks/*.json`, `src/tools_and_rag.py` |
 | 1 — Modelo + prompt + servicio | Modelo elegido, prompt diseñado, servido vía API | `src/main_mva.py` (`init_chat_model`, Instruction Contract, `with_structured_output`) |
 | 2 — RAG | Recuperar contexto relevante | `src/tools_and_rag.py` (`search_meet_transcript_rag`, `search_work_item_rag`) |
+| 3 — Tuning | Fine-tuning / PEFT | Fuera de alcance (no aplica a este MVA) |
+| 4 — Grounding y evaluación | Respuestas respaldadas por las fuentes y métricas | `src/grounding.py`, `src/evaluation.py`, `evals/golden_set.json` |
 
 ## Instalación
 
@@ -28,7 +30,8 @@ cp .env.example .env   # completa ANTHROPIC_API_KEY
 uv run python src/main_mva.py                     # plan de pruebas de todos los WI en mocks/
 uv run python src/main_mva.py WI-4052 WI-9999     # solo los WI indicados
 uv run python src/main_mva.py WI-4052 -q "¿Cuántos segundos dura la animación del spinner al pagar con Visa?"
-uv run pytest -v                                  # los tests que llaman al LLM se saltan sin ANTHROPIC_API_KEY
+uv run pytest -v                                  # deterministas; los de `-m llm` se saltan sin ANTHROPIC_API_KEY
+uv run python src/evaluation.py                   # evaluación contra el conjunto dorado (llama al LLM)
 ```
 
 Los Work Items se descubren desde `mocks/`: cada archivo `wi_<id>_*.json` es el `WI-<id>`.
@@ -66,6 +69,36 @@ Búsqueda (`k = 5`):
 El modelo de embeddings se descarga la primera vez (~220 MB) en `.cache/fastembed/`; se cambia con
 `MVA_EMBEDDINGS_MODEL`. Los tests usan embeddings falsos deterministas; para probar con los reales:
 `MVA_TEST_EMBEDDINGS=1 uv run pytest -v`.
+
+## Grounding y evaluación (Nivel 4)
+
+**Grounding** (`src/grounding.py`): el LLM ya no decide el estado ni la confianza.
+
+1. **RECAP**: se cargan TFS y Git y se recuperan los fragmentos de Meet vía RAG. Si falta una
+   fuente o está corrupta, se escala de inmediato **sin llamar al LLM**.
+2. **REASON**: el LLM propone discrepancias y casos; cada caso trae `evidence_quote`, una cita
+   literal de la fuente que indica su `grounding_source`.
+3. **VERIFY**: cada cita se busca en el texto real de esa fuente (ignorando mayúsculas, tildes y
+   espacios; se permiten elipsis). Los casos sin respaldo se descartan y quedan en el Audit Trail.
+
+`confidence_score = 0.5 · fuentes válidas / 3 + 0.5 · casos con respaldo / casos propuestos`.
+Con confianza ≥ 0.85 el plan queda `READY_FOR_QA`; si no, se escala sin casos. Los validadores
+de `QATestPlanOutput` impiden planes incoherentes (p. ej. un escalado con casos de prueba).
+
+En las preguntas, una respuesta solo se acepta si todas sus citas aparecen en las fuentes; si
+no, el agente responde *"No existe en las fuentes del WI"*.
+
+**Evaluación** (`src/evaluation.py`): corre el agente contra `evals/golden_set.json` (las 3
+trampas de WI-4052, el escalado de WI-4099, WI-9999 y dos preguntas) y reporta:
+
+| Métrica | Qué mide |
+|---|---|
+| `accuracy` | casos del conjunto dorado que pasan todas sus verificaciones |
+| `check_pass_rate` | verificaciones individuales que pasan |
+| `grounding_rate` | casos propuestos por el LLM con cita verificada |
+| `hallucination_guard` | preguntas sin respuesta en las fuentes que el agente rechaza |
+
+El reporte queda en `logs/eval_<fecha>.json`. Termina con código 0 solo si `accuracy` = 1.0.
 
 Cada ejecución deja su Audit Trail (trace_id, timestamp, reasoning_trace, tools, output)
 en `logs/audit.jsonl`.
