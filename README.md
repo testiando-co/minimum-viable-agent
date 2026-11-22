@@ -25,9 +25,14 @@ cp .env.example .env   # completa ANTHROPIC_API_KEY
 ## Uso
 
 ```bash
-uv run python src/main_mva.py   # WI-4052, WI-4099, WI-9999 y la pregunta adversaria
-uv run pytest -v                # los tests que llaman al LLM se saltan sin ANTHROPIC_API_KEY
+uv run python src/main_mva.py                     # plan de pruebas de todos los WI en mocks/
+uv run python src/main_mva.py WI-4052 WI-9999     # solo los WI indicados
+uv run python src/main_mva.py WI-4052 -q "¿Cuántos segundos dura la animación del spinner al pagar con Visa?"
+uv run pytest -v                                  # los tests que llaman al LLM se saltan sin ANTHROPIC_API_KEY
 ```
+
+Los Work Items se descubren desde `mocks/`: cada archivo `wi_<id>_*.json` es el `WI-<id>`.
+Para agregar uno, basta con poner su JSON en esa carpeta.
 
 Cada ejecución deja su Audit Trail (trace_id, timestamp, reasoning_trace, tools, output)
 en `logs/audit.jsonl`.
