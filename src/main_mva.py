@@ -1,7 +1,9 @@
-"""MVA de QA — Nivel 1 del GenAI Maturity Model.
+"""MVA de QA — Nivel 2 del GenAI Maturity Model.
 
 Nivel 1 = seleccionar el modelo, diseñar el prompt (Instruction Contract) y servir
 el modelo vía API. La salida se valida contra `QATestPlanOutput` (Pydantic).
+Nivel 2 = contexto vía RAG: el modelo ya no recibe la transcripción de Meet completa
+sino los fragmentos que recupera el RAG híbrido de tools_and_rag (embeddings + BM25).
 
 El modelo se elige con la variable de entorno MVA_MODEL en formato
 `proveedor:modelo` de LangChain (por defecto `anthropic:claude-opus-5-5`).
@@ -20,7 +22,13 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from logger import AuditTrail
 from schemas import QATestPlanOutput
-from tools_and_rag import fetch_tfs_and_git_data, list_work_item_ids, load_meet_transcript
+from tools_and_rag import (
+    NOT_FOUND,
+    fetch_tfs_and_git_data,
+    list_work_item_ids,
+    search_meet_transcript_rag,
+    search_work_item_rag,
+)
 
 load_dotenv()
 
@@ -58,7 +66,9 @@ PLAN_PROMPT = ChatPromptTemplate.from_messages(
             "human",
             "Genera el plan de pruebas del {wi_id}.\n\n"
             "<tfs_y_git>\n{tfs_and_git}\n</tfs_y_git>\n\n"
-            "<meet_po_demo>\n{meet_transcript}\n</meet_po_demo>",
+            "<meet_po_demo_rag>\n{meet_fragments}\n</meet_po_demo_rag>\n\n"
+            "Los fragmentos de Meet vienen de un RAG: cada uno trae su archivo de origen, "
+            "contexto, fecha y puntaje. Si hay un `warning`, la transcripción no es utilizable.",
         ),
     ]
 )
@@ -69,10 +79,10 @@ QUESTION_PROMPT = ChatPromptTemplate.from_messages(
         (
             "human",
             "Pregunta del ingeniero de QA sobre el {wi_id}: {question}\n\n"
-            "Responde en español, solo con lo que digan estas fuentes. Si la respuesta no "
-            "está en ninguna, responde que esa información no existe en las fuentes del WI.\n\n"
-            "<tfs_y_git>\n{tfs_and_git}\n</tfs_y_git>\n\n"
-            "<meet_po_demo>\n{meet_transcript}\n</meet_po_demo>",
+            "Responde en español, solo con lo que digan estos fragmentos recuperados por RAG, "
+            "y cita la fuente (`source` y `source_file`) de cada dato. Si la respuesta no está "
+            "en ningún fragmento, responde que esa información no existe en las fuentes del WI.\n\n"
+            "<fragmentos_rag>\n{fragments}\n</fragmentos_rag>",
         ),
     ]
 )
@@ -87,16 +97,32 @@ def build_llm() -> BaseChatModel:
     return init_chat_model(model_name(), max_tokens=16000)
 
 
-def _gather_sources(wi_id: str, audit: AuditTrail) -> Optional[dict[str, str]]:
-    """Recap: reúne las fuentes del WI. None si el WI no existe."""
+def _load_tfs_and_git(wi_id: str, audit: AuditTrail) -> Optional[str]:
+    """TFS + Git del WI como JSON, o None si el WI no existe."""
     tfs_and_git = fetch_tfs_and_git_data(wi_id)
     audit.tool("fetch_tfs_and_git_data", {"wi_id": wi_id}, tfs_and_git)
     if "error" in json.loads(tfs_and_git):
         audit.step("Recap", f"{wi_id} no existe en mocks/")
         return None
-    meet = load_meet_transcript(wi_id) or "(sin transcripción)"
-    audit.step("Recap", f"Fuentes cargadas: TFS+Git ({len(tfs_and_git)} chars), Meet ({len(meet)} chars)")
-    return {"wi_id": wi_id, "tfs_and_git": tfs_and_git, "meet_transcript": meet}
+    return tfs_and_git
+
+
+def _gather_sources(wi_id: str, audit: AuditTrail) -> Optional[dict[str, str]]:
+    """Recap: TFS + Git completos y los fragmentos de Meet que recupera el RAG.
+
+    La consulta al RAG sale de la propia especificación de TFS (regla de negocio y
+    requisito de UI), para traer lo que la PO dijo sobre esos mismos temas.
+    """
+    tfs_and_git = _load_tfs_and_git(wi_id, audit)
+    if tfs_and_git is None:
+        return None
+    tfs = json.loads(tfs_and_git)["tfs_specification"]
+    query = " ".join(filter(None, (tfs.get("business_rule"), tfs.get("ui_requirement"))))
+    meet = search_meet_transcript_rag(wi_id, query)
+    audit.tool("search_meet_transcript_rag", {"wi_id": wi_id, "query": query}, meet)
+    n_fragments = len(json.loads(meet)["fragments"])
+    audit.step("Recap", f"Fuentes: TFS+Git completos, {n_fragments} fragmentos de Meet vía RAG")
+    return {"wi_id": wi_id, "tfs_and_git": tfs_and_git, "meet_fragments": meet}
 
 
 def generate_test_plan(wi_id: str, llm: Optional[BaseChatModel] = None) -> dict[str, Any]:
@@ -127,18 +153,21 @@ def generate_test_plan(wi_id: str, llm: Optional[BaseChatModel] = None) -> dict[
 def answer_question(wi_id: str, question: str, llm: Optional[BaseChatModel] = None) -> str:
     """Pregunta libre sobre un WI, respondida solo con las fuentes del WI."""
     audit = AuditTrail(wi_id, question, model_name())
-    sources = _gather_sources(wi_id, audit)
-    if sources is None:
-        answer = json.loads(fetch_tfs_and_git_data(wi_id))["error"]
+    if _load_tfs_and_git(wi_id, audit) is None:
+        answer = NOT_FOUND["error"]
         audit.finish(answer)
         return answer
 
-    audit.step("Reason", "Invocando el LLM para responder la pregunta")
+    fragments = search_work_item_rag(wi_id, question)
+    audit.tool("search_work_item_rag", {"wi_id": wi_id, "query": question}, fragments)
+    audit.step("Recap", f"{len(json.loads(fragments)['fragments'])} fragmentos recuperados por RAG")
+
+    audit.step("Reason", "Invocando el LLM para responder la pregunta con los fragmentos")
     message = (QUESTION_PROMPT | (llm or build_llm())).invoke(
-        {**sources, "question": question, "threshold": CONFIDENCE_THRESHOLD}
+        {"wi_id": wi_id, "question": question, "fragments": fragments, "threshold": CONFIDENCE_THRESHOLD}
     )
     answer = message.text if hasattr(message, "text") else str(message.content)
-    audit.step("Verify", "Respuesta generada solo a partir de las fuentes entregadas")
+    audit.step("Verify", "Respuesta generada solo a partir de los fragmentos recuperados")
     audit.finish(answer)
     return answer
 

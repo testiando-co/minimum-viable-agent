@@ -173,7 +173,7 @@ def test_main_sin_mocks_devuelve_error(monkeypatch):
 # --- Instruction Contract --------------------------------------------------------
 def test_prompt_incluye_las_tres_fuentes():
     rendered = PLAN_PROMPT.format(
-        wi_id="WI-4052", tfs_and_git="TFS_GIT", meet_transcript="MEET", threshold=0.85
+        wi_id="WI-4052", tfs_and_git="TFS_GIT", meet_fragments="MEET", threshold=0.85
     )
     assert "TFS_GIT" in rendered and "MEET" in rendered and "0.85" in rendered
 
@@ -211,3 +211,141 @@ def test_prueba3_pregunta_adversaria_spinner_visa():
         "WI-4052", "¿Cuántos segundos dura la animación del spinner al pagar con Visa?"
     ).lower()
     assert "no existe" in answer or "no aparece" in answer or "no se menciona" in answer
+
+
+# =================================================================================
+# Nivel 2: RAG híbrido (embeddings falsos deterministas: sin red ni modelo)
+# =================================================================================
+import shutil
+
+from langchain_core.embeddings import DeterministicFakeEmbedding
+from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableLambda
+
+import tools_and_rag as rag
+
+
+@pytest.fixture
+def fake_index(monkeypatch):
+    index = rag.build_index(embeddings=DeterministicFakeEmbedding(size=64))
+    monkeypatch.setattr(rag, "get_index", lambda: index)
+    return index
+
+
+def _meet_chunks(wi_file="wi_4052_happy_path.json"):
+    docs = rag.split_work_item_file(MOCKS_DIR / wi_file)
+    return [d for d in docs if d.metadata["source"] == "MEET_PO_DEMO"]
+
+
+def test_split_respeta_tamano_y_solapamiento_de_20_caracteres():
+    chunks = _meet_chunks()
+    assert rag.CHUNK_OVERLAP == 20 and len(chunks) > 1
+    assert all(len(c.page_content) <= rag.CHUNK_SIZE for c in chunks)
+    for prev, nxt in zip(chunks, chunks[1:]):
+        prev_end = prev.metadata["start_index"] + len(prev.page_content)
+        overlap = prev_end - nxt.metadata["start_index"]
+        assert 0 < overlap <= rag.CHUNK_OVERLAP
+
+
+def test_cada_chunk_trae_archivo_contexto_y_fecha():
+    docs = rag.split_work_item_file(MOCKS_DIR / "wi_4052_happy_path.json")
+    assert {d.metadata["source"] for d in docs} == {"TFS", "MEET_PO_DEMO", "GIT_DIFF"}
+    for d in docs:
+        assert d.metadata["source_file"] == "wi_4052_happy_path.json"
+        assert d.metadata["context"].startswith("WI-4052")
+        assert d.metadata["date"] == rag.date.fromisoformat(d.metadata["date"]).isoformat()
+
+
+def test_metadata_se_puede_ingresar_a_mano():
+    docs = rag.split_work_item_file(
+        MOCKS_DIR / "wi_4052_happy_path.json", context="Export de TFS del sprint 12", date_="2026-01-15"
+    )
+    assert {(d.metadata["context"], d.metadata["date"]) for d in docs} == {
+        ("Export de TFS del sprint 12", "2026-01-15")
+    }
+
+
+def test_wi_4099_sin_commit_no_genera_chunks_de_git_y_marca_meet_corrupto():
+    docs = rag.split_work_item_file(MOCKS_DIR / "wi_4099_exception_path.json")
+    assert "GIT_DIFF" not in {d.metadata["source"] for d in docs}
+    assert all(d.metadata["corrupt"] for d in docs if d.metadata["source"] == "MEET_PO_DEMO")
+
+
+def test_indice_cubre_todos_los_archivos_de_mocks(fake_index):
+    files = {os.path.basename(p) for p in rag.list_mock_files()}
+    assert {d.metadata["source_file"] for d in fake_index.documents} == files
+
+
+def test_busqueda_devuelve_max_k_5_ordenados_y_filtrados(fake_index):
+    hits = fake_index.search("recargo por mora", where={"wi_id": "WI-4052"})
+    assert 0 < len(hits) <= rag.TOP_K == 5
+    scores = [h.metadata["score"] for h in hits]
+    assert scores == sorted(scores, reverse=True)
+    assert all(h.metadata["wi_id"] == "WI-4052" for h in hits)
+
+
+def test_reranking_por_terminos_bm25(fake_index, monkeypatch):
+    monkeypatch.setattr(rag, "EMBEDDINGS_WEIGHT", 0.0)  # solo BM25
+    top = fake_index.search("SURCHARGE_RATE days_overdue", where={"wi_id": "WI-4052"})[0]
+    assert top.metadata["source"] == "GIT_DIFF" and top.metadata["score_bm25"] == 1.0
+
+
+def test_reranking_por_embeddings(fake_index, monkeypatch):
+    monkeypatch.setattr(rag, "EMBEDDINGS_WEIGHT", 1.0)  # solo embeddings
+    target = _meet_chunks()[1]
+    top = fake_index.search(target.page_content, where={"wi_id": "WI-4052"})[0]
+    assert top.metadata["chunk_id"] == target.metadata["chunk_id"]
+
+
+def test_reranking_prefiere_el_documento_mas_reciente(tmp_path, monkeypatch):
+    for name in ("wi_1_viejo.json", "wi_2_nuevo.json"):
+        shutil.copy(MOCKS_DIR / "wi_4052_happy_path.json", tmp_path / name)
+    monkeypatch.setattr(rag, "MOCKS_DIR", tmp_path)
+    index = rag.build_index(
+        embeddings=DeterministicFakeEmbedding(size=64),
+        metadata_overrides={
+            "wi_1_viejo.json": {"date": "2025-01-01"},
+            "wi_2_nuevo.json": {"date": "2026-11-01"},
+        },
+    )
+    top = index.search("recargo por mora del 8.5%", where={"source": "MEET_PO_DEMO"})[0]
+    assert top.metadata["source_file"] == "wi_2_nuevo.json"
+    assert top.metadata["score_recency"] == 1.0
+
+
+def test_rag_meet_wi_4099_avisa_transcripcion_corrupta(fake_index):
+    result = json.loads(rag.search_meet_transcript_rag("WI-4099", "reembolso"))
+    assert result["fragments"] == [] and "corrupto" in result["warning"]
+
+
+def test_rag_meet_wi_4052_devuelve_fragmentos_con_puntaje(fake_index):
+    result = json.loads(rag.search_meet_transcript_rag("WI-4052", "recargo por mora"))
+    assert result["fragments"] and "warning" not in result
+    for f in result["fragments"]:
+        assert f["source"] == "MEET_PO_DEMO" and 0 <= f["score"] <= 1
+        assert {"source_file", "context", "date", "score_embeddings", "score_bm25"} <= f.keys()
+
+
+def test_rag_wi_inexistente_error_controlado(fake_index):
+    assert json.loads(rag.search_meet_transcript_rag("WI-9999", "x")) == {"error": "Work Item not found"}
+    assert json.loads(rag.search_work_item_rag("WI-9999", "x")) == {"error": "Work Item not found"}
+
+
+def test_rag_wi_4099_excluye_fuentes_corruptas(fake_index):
+    result = json.loads(rag.search_work_item_rag("WI-4099", "reembolso"))
+    assert {f["source"] for f in result["fragments"]} == {"TFS"}
+    assert len(result["warnings"]) == 2
+
+
+def test_answer_question_le_pasa_al_llm_los_fragmentos_rag(fake_index):
+    prompts = []
+    fake_llm = RunnableLambda(lambda pv: prompts.append(pv.to_string()) or AIMessage("No existe en las fuentes"))
+    assert answer_question("WI-4052", "¿spinner con Visa?", llm=fake_llm) == "No existe en las fuentes"
+    assert "fragmentos_rag" in prompts[0] and "source_file" in prompts[0]
+
+
+@pytest.mark.skipif(not os.getenv("MVA_TEST_EMBEDDINGS"), reason="define MVA_TEST_EMBEDDINGS=1 para usar FastEmbed")
+def test_rag_con_embeddings_reales_encuentra_el_recargo_de_meet():
+    rag.get_index.cache_clear()
+    result = json.loads(rag.search_meet_transcript_rag("WI-4052", "porcentaje del recargo por mora"))
+    assert "8.5%" in result["fragments"][0]["text"]
