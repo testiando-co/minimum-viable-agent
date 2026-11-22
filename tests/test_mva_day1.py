@@ -1,7 +1,7 @@
 """Suite del MVA.
 
-- Tests offline: contratos, herramientas y prompt. Siempre corren.
-- Tests `live`: llaman al LLM real. Se saltan si no hay ANTHROPIC_API_KEY.
+- Tests deterministas: corren sin API key (LLM simulado y embeddings falsos).
+- Tests `@pytest.mark.llm`: llaman al LLM real. Se saltan si no hay ANTHROPIC_API_KEY.
 """
 
 import json
@@ -14,15 +14,21 @@ from main_mva import INSTRUCTION_CONTRACT, PLAN_PROMPT, answer_question, generat
 from schemas import QATestPlanOutput, TestCaseItem, WorkItemFile
 from tools_and_rag import (
     MOCKS_DIR,
+    ROOT_DIR as ROOT,
     fetch_tfs_and_git_data,
     list_work_item_ids,
     load_meet_transcript,
     load_work_item,
 )
 
-live = pytest.mark.skipif(
+_needs_api_key = pytest.mark.skipif(
     not os.getenv("ANTHROPIC_API_KEY"), reason="requiere ANTHROPIC_API_KEY para llamar al LLM"
 )
+
+
+def live(test):
+    """Variante con el modelo real: `pytest -m llm` para correr solo estas."""
+    return pytest.mark.llm(_needs_api_key(test))
 
 
 class ExplodingLLM:
@@ -175,42 +181,28 @@ def test_prompt_incluye_las_tres_fuentes():
     rendered = PLAN_PROMPT.format(
         wi_id="WI-4052", tfs_and_git="TFS_GIT", meet_fragments="MEET", threshold=0.85
     )
-    assert "TFS_GIT" in rendered and "MEET" in rendered and "0.85" in rendered
+    assert "TFS_GIT" in rendered and "MEET" in rendered
 
 
 def test_ic_contiene_reglas_de_negocio():
-    for rule in ("prioridad sobre TFS", "ESCALATE_TO_HUMAN_MISSING_DATA", "NO inventes"):
+    for rule in ("prioridad sobre TFS", "ESCALATE_TO_HUMAN_MISSING_DATA", "NO inventes", "evidence_quote"):
         assert rule in INSTRUCTION_CONTRACT
 
 
 # --- Pruebas de aceptación contra el LLM real -----------------------------------
 @live
-def test_prueba1_happy_path_wi_4052():
-    plan = generate_test_plan("WI-4052")
-    assert plan["status"] == "READY_FOR_QA"
-    assert plan["confidence_score"] >= 0.85
-    cases = json.dumps(plan["test_cases"], ensure_ascii=False)
-    assert "8.5" in cases
-    assert any(c["grounding_source"] == "MEET_PO_DEMO" for c in plan["test_cases"])
-    assert any(c["category"] in ("bug_hunt", "edge_case") for c in plan["test_cases"])
-    assert len(plan["detected_discrepancies"]) >= 3
+def test_prueba1_happy_path_wi_4052_llm_real():
+    from evaluation import evaluate_plan
+
+    golden = json.loads((ROOT / "evals" / "golden_set.json").read_text(encoding="utf-8"))
+    result = evaluate_plan(next(p for p in golden["plans"] if p["wi_id"] == "WI-4052"))
+    assert all(c["passed"] for c in result["checks"]), result["checks"]
 
 
 @live
-def test_prueba2_exception_path_wi_4099():
-    plan = generate_test_plan("WI-4099")
-    assert plan["status"] == "ESCALATE_TO_HUMAN_MISSING_DATA"
-    assert plan["confidence_score"] < 0.85
-    assert plan["test_cases"] == []
-    assert plan["human_escalation_reason"]
-
-
-@live
-def test_prueba3_pregunta_adversaria_spinner_visa():
-    answer = answer_question(
-        "WI-4052", "¿Cuántos segundos dura la animación del spinner al pagar con Visa?"
-    ).lower()
-    assert "no existe" in answer or "no aparece" in answer or "no se menciona" in answer
+def test_prueba3_pregunta_adversaria_spinner_visa_llm_real():
+    answer = answer_question("WI-4052", "¿Cuántos segundos dura la animación del spinner al pagar con Visa?")
+    assert answer.startswith("No existe en las fuentes")
 
 
 # =================================================================================
@@ -219,7 +211,6 @@ def test_prueba3_pregunta_adversaria_spinner_visa():
 import shutil
 
 from langchain_core.embeddings import DeterministicFakeEmbedding
-from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
 
 import tools_and_rag as rag
@@ -338,10 +329,9 @@ def test_rag_wi_4099_excluye_fuentes_corruptas(fake_index):
 
 
 def test_answer_question_le_pasa_al_llm_los_fragmentos_rag(fake_index):
-    prompts = []
-    fake_llm = RunnableLambda(lambda pv: prompts.append(pv.to_string()) or AIMessage("No existe en las fuentes"))
-    assert answer_question("WI-4052", "¿spinner con Visa?", llm=fake_llm) == "No existe en las fuentes"
-    assert "fragmentos_rag" in prompts[0] and "source_file" in prompts[0]
+    llm = FakeStructuredLLM(lambda schema, prompt: GroundedAnswer(found=False, answer="", citations=[]))
+    answer_question("WI-4052", "¿spinner con Visa?", llm=llm)
+    assert "fragmentos_rag" in llm.prompts[0] and "source_file" in llm.prompts[0]
 
 
 @pytest.mark.skipif(not os.getenv("MVA_TEST_EMBEDDINGS"), reason="define MVA_TEST_EMBEDDINGS=1 para usar FastEmbed")
@@ -349,3 +339,192 @@ def test_rag_con_embeddings_reales_encuentra_el_recargo_de_meet():
     rag.get_index.cache_clear()
     result = json.loads(rag.search_meet_transcript_rag("WI-4052", "porcentaje del recargo por mora"))
     assert "8.5%" in result["fragments"][0]["text"]
+
+
+# =================================================================================
+# Nivel 4: grounding, FCoT y evaluación (LLM simulado: deterministas, sin API key)
+# =================================================================================
+from evaluation import run_evaluation
+from grounding import compute_confidence, quote_in_source, verify_test_cases
+from main_mva import run_test_plan
+from schemas import EvidencedTestCase, GroundedAnswer, LLMTestPlanDraft
+
+
+class FakeStructuredLLM:
+    """LLM simulado: `responder(schema, prompt)` decide qué objeto devuelve."""
+
+    def __init__(self, responder):
+        self.responder = responder
+        self.prompts: list[str] = []
+
+    def with_structured_output(self, schema, **_):
+        def respond(prompt_value):
+            self.prompts.append(prompt_value.to_string())
+            return self.responder(schema, self.prompts[-1])
+
+        return RunnableLambda(respond)
+
+
+def _case(test_id, category, source, then, quote):
+    return EvidencedTestCase(
+        test_id=test_id, category=category, given_context="Factura vencida en el checkout PSE",
+        when_action="El usuario paga la factura", then_expected=then,
+        grounding_source=source, evidence_quote=quote,
+    )
+
+
+GOOD_CASES = [
+    _case("TC-01", "functional", "MEET_PO_DEMO", "Se aplica un recargo por mora del 8.5% (no el 5% de TFS)",
+          "el recargo por mora debe ser exactamente del 8.5% para facturas mayores a 30 días"),
+    _case("TC-02", "edge_case", "GIT_DIFF_DISCREPANCY", "Con 30 días exactos NO se aplica recargo",
+          "if days_overdue >= 30"),
+    _case("TC-03", "bug_hunt", "GIT_DIFF_DISCREPANCY", "El botón Pagar queda bloqueado 3 segundos",
+          "BUG OCULTO: No activó bloqueo de 3s"),
+]
+GOOD_DRAFT = LLMTestPlanDraft(
+    detected_discrepancies=["Recargo 8.5% (Meet) vs 5% (TFS)", ">= 30 en el código vs > 30",
+                            "No se activó el bloqueo de 3 s pedido en Meet"],
+    test_cases=GOOD_CASES,
+)
+INVENTED = _case("TC-99", "functional", "TFS", "Recargo del 12%", "el recargo es del 12% para todas las facturas")
+
+
+def _good_responder(schema, prompt):
+    if schema is LLMTestPlanDraft:
+        return GOOD_DRAFT
+    if "spinner" in prompt:
+        return GroundedAnswer(found=False, answer="El dato no aparece en los fragmentos.", citations=[])
+    return GroundedAnswer(found=True, answer="La PO pidió un recargo del 8.5%.", citations=[
+        {"source": "MEET_PO_DEMO", "quote": "el recargo por mora debe ser exactamente del 8.5%"}])
+
+
+# --- Grounding ---------------------------------------------------------------------
+def test_cita_literal_se_encuentra_ignorando_tildes_mayusculas_y_espacios():
+    assert quote_in_source("RECARGO  por mora   debe ser exactamente del 8.5%",
+                           "el recargo por mora debe ser exactamente del 8.5%")
+    assert quote_in_source("Ya NO es el 5% … ahora el recargo", "ya NO es el 5% de recargo, ahora el recargo")
+    assert not quote_in_source("el recargo es del 12%", "el recargo por mora es del 8.5%")
+    assert not quote_in_source("8.5", "8.5%")  # citas demasiado cortas no cuentan
+
+
+def test_casos_con_citas_inventadas_se_descartan():
+    report = verify_test_cases(load_work_item("WI-4052"), GOOD_CASES + [INVENTED])
+    assert [c.test_id for c in report.grounded] == ["TC-01", "TC-02", "TC-03"]
+    assert [r["test_id"] for r in report.rejected] == ["TC-99"]
+    assert "evidence_quote" not in report.grounded[0].model_dump()  # se entrega el contrato limpio
+
+
+def test_cita_de_otra_fuente_no_cuenta():
+    misattributed = _case("TC-X", "functional", "TFS", "8.5%",
+                          "el recargo por mora debe ser exactamente del 8.5%")  # está en Meet, no en TFS
+    assert verify_test_cases(load_work_item("WI-4052"), [misattributed]).grounded == []
+
+
+@pytest.mark.parametrize("sources,total,grounded,expected", [
+    (3, 3, 3, 1.0), (3, 4, 3, 0.875), (3, 3, 1, 0.6667), (1, 0, 0, 0.1667),
+])
+def test_confianza_se_calcula_con_reglas(sources, total, grounded, expected):
+    assert compute_confidence(sources, total, grounded) == expected
+
+
+# --- Validadores del contrato de salida ------------------------------------------------
+@pytest.mark.parametrize("kwargs", [
+    {"status": "ESCALATE_TO_HUMAN_MISSING_DATA", "confidence_score": 0.9, "human_escalation_reason": "x"},
+    {"status": "ESCALATE_TO_HUMAN_MISSING_DATA", "confidence_score": 0.2, "human_escalation_reason": None},
+    {"status": "ESCALATE_TO_HUMAN_MISSING_DATA", "confidence_score": 0.2, "human_escalation_reason": "x",
+     "test_cases": [GOOD_CASES[0].model_dump(exclude={"evidence_quote"})]},
+    {"status": "READY_FOR_QA", "confidence_score": 0.5, "human_escalation_reason": None},
+    {"status": "READY_FOR_QA", "confidence_score": 0.9, "human_escalation_reason": "x"},
+    {"status": "READY_FOR_QA", "confidence_score": 0.9, "human_escalation_reason": None, "test_cases": []},
+])
+def test_validadores_rechazan_planes_incoherentes(kwargs):
+    base = {"wi_id": "WI-1", "detected_discrepancies": [],
+            "test_cases": [GOOD_CASES[0].model_dump(exclude={"evidence_quote"})]}
+    with pytest.raises(ValidationError):
+        QATestPlanOutput(**{**base, **kwargs})
+
+
+# --- Pruebas de aceptación deterministas ----------------------------------------------
+def test_prueba1_wi_4052_ready_con_las_3_trampas(fake_index):
+    plan = generate_test_plan("WI-4052", llm=FakeStructuredLLM(_good_responder))
+    assert isinstance(plan, QATestPlanOutput)
+    assert plan.status == "READY_FOR_QA" and plan.confidence_score >= 0.85
+    by_id = {c.test_id: c for c in plan.test_cases}
+    assert "8.5%" in by_id["TC-01"].then_expected and by_id["TC-01"].grounding_source == "MEET_PO_DEMO"
+    assert by_id["TC-02"].category == "edge_case" and "30 días exactos" in by_id["TC-02"].then_expected
+    assert by_id["TC-03"].category in ("ui_visual", "bug_hunt") and "3 segundos" in by_id["TC-03"].then_expected
+
+
+def test_prueba1_caso_inventado_se_descarta_del_plan(fake_index):
+    draft = GOOD_DRAFT.model_copy(update={"test_cases": GOOD_CASES + [INVENTED]})
+    plan, report = run_test_plan("WI-4052", llm=FakeStructuredLLM(lambda schema, prompt: draft))
+    assert plan.status == "READY_FOR_QA" and plan.confidence_score == 0.875
+    assert "TC-99" not in {c.test_id for c in plan.test_cases}
+    assert report.rejected[0]["test_id"] == "TC-99"
+
+
+def test_plan_mayormente_inventado_escala_sin_casos(fake_index):
+    draft = GOOD_DRAFT.model_copy(update={"test_cases": [GOOD_CASES[0], INVENTED, INVENTED]})
+    plan = generate_test_plan("WI-4052", llm=FakeStructuredLLM(lambda schema, prompt: draft))
+    assert plan.status == "ESCALATE_TO_HUMAN_MISSING_DATA" and plan.confidence_score < 0.85
+    assert plan.test_cases == [] and "1 de 3" in plan.human_escalation_reason
+
+
+def test_prueba2_wi_4099_escala_sin_invocar_al_llm():
+    plan = generate_test_plan("WI-4099", llm=ExplodingLLM())
+    assert plan.status == "ESCALATE_TO_HUMAN_MISSING_DATA"
+    assert plan.confidence_score < 0.85 and plan.test_cases == []
+    reason = plan.human_escalation_reason.lower()
+    assert "meet" in reason and "corrupto" in reason and "git" in reason and "null" in reason
+
+
+def test_prueba3_pregunta_sin_respuesta_en_las_fuentes(fake_index):
+    answer = answer_question("WI-4052", "¿Cuántos segundos dura la animación del spinner al pagar con Visa?",
+                             llm=FakeStructuredLLM(_good_responder))
+    assert answer.startswith("No existe en las fuentes del WI-4052")
+
+
+def test_prueba3_cita_inventada_se_convierte_en_no_existe(fake_index):
+    liar = FakeStructuredLLM(lambda schema, prompt: GroundedAnswer(
+        found=True, answer="El spinner dura 2 segundos.",
+        citations=[{"source": "MEET_PO_DEMO", "quote": "el spinner dura 2 segundos con Visa"}]))
+    assert answer_question("WI-4052", "¿spinner?", llm=liar).startswith("No existe en las fuentes")
+
+
+def test_respuesta_con_cita_verificada_incluye_la_fuente(fake_index):
+    answer = answer_question("WI-4052", "¿Qué recargo pidió la PO?", llm=FakeStructuredLLM(_good_responder))
+    assert "8.5%" in answer and "[MEET_PO_DEMO]" in answer
+
+
+def test_prueba5_audit_trail_registra_recap_reason_verify(fake_index, tmp_path, monkeypatch):
+    import logger
+
+    monkeypatch.setattr(logger, "LOG_FILE", tmp_path / "audit.jsonl")
+    generate_test_plan("WI-4052", llm=FakeStructuredLLM(_good_responder))
+    record = json.loads((tmp_path / "audit.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    phases = [step["phase"] for step in record["reasoning_trace"]]
+    assert [p for i, p in enumerate(phases) if p not in phases[:i]] == ["RECAP", "REASON", "VERIFY"]
+    assert {"trace_id", "timestamp", "tools", "output"} <= record.keys()
+    assert record["tools"][0]["input"] == {"wi_id": "WI-4052"} and record["tools"][0]["output"]
+    assert record["output"]["grounding"]["grounded_cases"] == 3
+
+
+# --- Evaluación ---------------------------------------------------------------------
+def test_evaluacion_con_agente_correcto_pasa_todo(fake_index):
+    summary = run_evaluation(llm=FakeStructuredLLM(_good_responder))["summary"]
+    assert summary["accuracy"] == 1.0 and summary["check_pass_rate"] == 1.0
+    assert summary["grounding_rate"] == 1.0 and summary["hallucination_guard"] == 1.0
+
+
+def test_evaluacion_detecta_trampa_faltante_y_alucinacion(fake_index):
+    def bad(schema, prompt):
+        if schema is LLMTestPlanDraft:  # olvida la trampa 3
+            return GOOD_DRAFT.model_copy(update={"test_cases": GOOD_CASES[:2]})
+        return GroundedAnswer(found=True, answer="Dura 2 segundos.",
+                              citations=[{"source": "MEET_PO_DEMO", "quote": "dura 2 segundos el spinner"}])
+
+    evaluation = run_evaluation(llm=FakeStructuredLLM(bad))
+    failed = {c["name"] for r in evaluation["results"] for c in r["checks"] if not c["passed"]}
+    assert "Trampa 3: bloqueo de 3 segundos del botón Pagar" in failed
+    assert "responde con citas verificadas" in failed  # la cita inventada no se acepta
+    assert evaluation["summary"]["accuracy"] < 1.0
