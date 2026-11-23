@@ -8,36 +8,46 @@ for Building Multi-Agent Systems*. Cada nivel alcanzado tiene un tag anotado en 
 |---|---|---|
 | 0 — Data foundation | `nivel-0` | Mocks válidos; esquemas Pydantic de entrada (`WorkItemFile`, `extra="forbid"`); `missing_or_corrupt_sources()`; `fetch_tfs_and_git_data` con error controlado |
 | 1 — Modelo + prompt + servicio | `nivel-1` | `init_chat_model`, Instruction Contract, `with_structured_output(method="json_schema")`, Audit Trail |
-| 2 — RAG | `nivel-2` | WI descubiertos desde `mocks/`; RAG híbrido (FAISS + BM25, reranking con fecha, k=5, chunks de 200 con 20 de solapamiento, metadata `source_file`/`context`/`date`) |
+| 2 — RAG | `nivel-2` | WI descubiertos desde `mocks/`; RAG híbrido (FAISS — hoy Chroma — + BM25, reranking con fecha, k=5, chunks de 200 con 20 de solapamiento, metadata `source_file`/`context`/`date`) |
 | 3 — Tuning | — | Omitido a propósito (no aplica a este MVA) |
 | 4 — Grounding y evaluación | `nivel-4` | Citas verificadas contra la fuente; confianza por reglas; FCoT RECAP → REASON → VERIFY; validadores del plan; `evals/golden_set.json` + `src/evaluation.py`; proveedor elegible desde `.env` |
+| 5 — Agente único | (pendiente) | `src/agent_loop/` con LangGraph (sense → plan → reason → verify → act); memoria de corto plazo (InMemorySaver) y largo plazo (Chroma); RAG en Chroma persistente; una traza de LangSmith por ejecución |
 
 ## Arquitectura actual
 
-- `src/schemas.py`: entrada (mocks), contratos de salida con validadores y borradores del LLM con
+- `src/agent_loop/`: grafo de LangGraph. `sense` (RECAP: TFS/Git, RAG, memoria) → `plan` (REASON:
+  `not_found` / `llm`) → `reason` (LLM + IC) → `verify` (grounding) → `act` (Audit Trail
+  y memoria). `memory.py`: corto plazo con `InMemorySaver` (campo `history`, un thread por sesión) y
+  largo plazo en Chroma (`mva_long_term_memory`). `prompts.py`: IC. `llm.py`: proveedor.
+- `src/main_mva.py`: CLI y API pública; la CLI es una sola traza (`MVA CLI`).
+- `src/schemas.py`: entrada (mocks), contratos con validadores y borradores del LLM con
   `evidence_quote`. `CONFIDENCE_THRESHOLD = 0.85`.
-- `src/tools_and_rag.py`: carga de mocks, `list_work_item_ids`, RAG híbrido
-  (`search_meet_transcript_rag`, `search_work_item_rag`), `get_embeddings` (FastEmbed u Ollama).
-- `src/grounding.py`: `quote_in_source` (acepta `...`, `…`, `[...]`, `(...)`; ignora `[hh:mm:ss]`),
-  `verify_test_cases`, `compute_confidence = 0.5·fuentes válidas/3 + 0.5·casos con respaldo/propuestos`.
-- `src/main_mva.py`: Instruction Contract, `run_test_plan`/`generate_test_plan`,
-  `run_question`/`answer_question`, selección de proveedor (`build_llm`, `llm_available`, `llm_errors`), CLI.
-- `src/evaluation.py`: métricas `accuracy`, `check_pass_rate`, `grounding_rate`, `hallucination_guard`.
-- `src/logger.py`: Audit Trail en `logs/audit.jsonl` (entradas y salidas completas de herramientas).
+- `src/tools_and_rag.py`: carga de mocks, `list_work_item_ids`, RAG híbrido con Chroma persistente
+  (`chroma.db/`, se reindexa solo si cambia la huella) + BM25; herramientas con `@traceable`.
+- `src/grounding.py`: `quote_in_source`, `verify_test_cases`, `compute_confidence`.
+- `src/evaluation.py`: métricas; cada caso en su propia sesión; una sola traza (`MVA evaluación`).
+- `src/logger.py`: Audit Trail en `logs/audit.jsonl`.
 
-`grounding.py`, `evaluation.py` y `evals/` no están en la estructura obligatoria de la guía; se
-agregaron para el Nivel 4.
+`agent_loop/`, `grounding.py`, `evaluation.py` y `evals/` no están en la estructura obligatoria de
+la guía.
 
 ## Decisiones clave
 
 - El LLM **no** decide `status` ni `confidence_score`: los calculan reglas verificables.
-- Datos faltantes o corruptos (WI-4099) escalan **sin invocar al LLM**.
+- Escalar a un humano lo decide el agente (LLM con `escalate_to_human`); las reglas son una
+  barrera: si la confianza no llega a 0.85 se escala igual, y una fuente corrupta nunca sirve de
+  respaldo para un caso.
 - Un caso sin cita verificable se descarta; si queda confianza < 0.85, se escala sin casos.
 - Pregunta sin respaldo verificable → `UNVERIFIED_ANSWER` ("No pude verificar… no estoy seguro de
   que exista"), sin agregar el texto del LLM.
+- La memoria es solo contexto: nunca es fuente ni se acepta como cita en el grounding.
+- Los nodos que llaman al LLM pasan el `config` del grafo; si no, LangSmith abre otra traza.
+- El estado del grafo guarda solo dicts/listas (serializables por el checkpointer).
 - Anthropic con Opus 5.5 requiere `method="json_schema"` (rechaza el *forced tool calling*).
-- Tests deterministas con LLM simulado (`FakeStructuredLLM`) y embeddings falsos; las variantes
-  con el modelo real llevan `@pytest.mark.llm` y se saltan si el proveedor no está configurado.
+- Tests unitarios (`tests/test_unitarias.py`) con LLM simulado (`FakeStructuredLLM`), embeddings
+  falsos y Chroma en carpeta temporal (`tests/conftest.py`); las 5 de aceptación
+  (`tests/test_mva_day1.py`) usan el modelo real, llevan `@pytest.mark.llm` y se saltan si el
+  proveedor no está configurado.
 
 ## Proveedores probados (5 criterios de aceptación con el modelo real)
 
@@ -66,7 +76,9 @@ caso del día 30 debe decir que **no** se aplica recargo y la trampa 3 debe veni
 - `temperature` solo se fija con Ollama; con Gemini y Anthropic los resultados varían entre corridas.
 - La fecha de la metadata del RAG es la de modificación del archivo; tras un `git clone` todas
   coinciden y el factor de fecha no influye hasta ingresarlas a mano.
-- `langchain-community` (FAISS, FastEmbed) emite un aviso de *sunset*.
+- `langchain-community` (FastEmbed) emite un aviso de *sunset*.
+- Datos quemados en los tests (citas copiadas de los mocks): se dejó para después.
+- La memoria de largo plazo crece sin límite y puede influir en evaluaciones repetidas.
 - Falta la explicación por archivo del concepto del Día 01 que aplica (pedida en `INSTRUCTIONS.md`
   para el video).
 - PR `dev` → `main` pendiente.

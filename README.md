@@ -8,10 +8,11 @@ y genera un plan de pruebas validado con Pydantic (`QATestPlanOutput`).
 | Nivel | Qué exige | Dónde está |
 |---|---|---|
 | 0 — Data foundation | Datos curados y accesibles | `mocks/*.json`, `src/tools_and_rag.py` |
-| 1 — Modelo + prompt + servicio | Modelo elegido, prompt diseñado, servido vía API | `src/main_mva.py` (`init_chat_model`, Instruction Contract, `with_structured_output`) |
+| 1 — Modelo + prompt + servicio | Modelo elegido, prompt diseñado, servido vía API | `src/agent_loop/llm.py`, `src/agent_loop/prompts.py` (Instruction Contract) |
 | 2 — RAG | Recuperar contexto relevante | `src/tools_and_rag.py` (`search_meet_transcript_rag`, `search_work_item_rag`) |
 | 3 — Tuning | Fine-tuning / PEFT | Fuera de alcance (no aplica a este MVA) |
 | 4 — Grounding y evaluación | Respuestas respaldadas por las fuentes y métricas | `src/grounding.py`, `src/evaluation.py`, `evals/golden_set.json` |
+| 5 — Agente único | Agente orquestado, memoria, AgentOps (trazas) | `src/agent_loop/` (LangGraph), memoria en memoria + Chroma, LangSmith |
 
 ## Instalación
 
@@ -57,6 +58,39 @@ uv run python src/evaluation.py                   # evaluación contra el conjun
 Los Work Items se descubren desde `mocks/`: cada archivo `wi_<id>_*.json` es el `WI-<id>`.
 Para agregar uno, basta con poner su JSON en esa carpeta.
 
+## Arquitectura del agente (Nivel 5)
+
+El agente es un grafo de LangGraph en `src/agent_loop/`, organizado según su anatomía:
+
+```
+START → sense → plan ─┬─ llm ───────→ reason → verify → act → END
+                      └─ not_found ─────────────────────→ act
+```
+
+| Módulo | Rol | Fase FCoT en el Audit Trail |
+|---|---|---|
+| `state.py` | Estado compartido del grafo | — |
+| `sense.py` | Percibir: TFS/Git, RAG y memoria | RECAP |
+| `plan.py` | Decidir el camino (WI inexistente → error controlado) | REASON |
+| `reason.py` | El agente decide: plan de pruebas o escalar a un humano | REASON |
+| `verify.py` | Grounding y confianza por reglas | VERIFY |
+| `act.py` | Entregar, escribir el Audit Trail y guardar en memoria | — |
+| `memory.py` | Memoria de corto y largo plazo | — |
+| `prompts.py` / `llm.py` / `graph.py` | Instruction Contract / modelo / grafo | — |
+
+**Memoria**
+- *Corto plazo* (en memoria): el checkpointer `InMemorySaver` de LangGraph guarda el estado de la
+  sesión; el campo `history` acumula los turnos y el LLM ve los últimos 5. Se pierde al salir.
+- *Largo plazo* (Chroma, colección `mva_long_term_memory` en `chroma.db/`): al terminar cada
+  ejecución se guarda un resumen; en SENSE se recuperan las 3 ejecuciones pasadas más parecidas.
+
+La memoria es solo contexto: no es una fuente y el grounding nunca la acepta como cita.
+
+**Trazas (LangSmith)**: cada ejecución del agente es un solo `graph.invoke`, así que queda en
+**una sola traza** con los nodos, las herramientas (`@traceable`), el RAG y la llamada al LLM
+anidados. La CLI (`MVA CLI`) y la evaluación (`MVA evaluación`) agrupan todas sus ejecuciones en
+una traza raíz. El `trace_id` del Audit Trail va en la metadata de la traza.
+
 ## RAG híbrido (Nivel 2)
 
 Se indexan **todos** los archivos de `mocks/`. Cada fuente del WI (TFS, Meet, Git) se parte
@@ -78,8 +112,9 @@ build_index(metadata_overrides={"wi_4052_happy_path.json": {"context": "Export T
 ```
 
 Búsqueda (`k = 5`):
-1. **Candidatos** por embeddings locales (FAISS + FastEmbed `paraphrase-multilingual-MiniLM-L12-v2`,
-   sin API key) y por términos (BM25).
+1. **Candidatos** por embeddings locales en un vector store persistente (Chroma en `chroma.db/`,
+   con FastEmbed `paraphrase-multilingual-MiniLM-L12-v2`, sin API key) y por términos (BM25).
+   Chroma solo recalcula los embeddings si cambian los mocks, el split o el modelo de embeddings.
 2. **Reranking**: `0.5 · embeddings + 0.5 · BM25` (cada señal normalizada contra su máximo),
    multiplicado por un factor de fecha que puede restar hasta 20 % a los documentos más antiguos
    (vida media de 30 días respecto al más reciente).
@@ -92,17 +127,21 @@ El modelo de embeddings se descarga la primera vez (~220 MB) en `.cache/fastembe
 
 ## Grounding y evaluación (Nivel 4)
 
-**Grounding** (`src/grounding.py`): el LLM ya no decide el estado ni la confianza.
+**Grounding** (`src/grounding.py`): el agente decide; las reglas verifican.
 
-1. **RECAP**: se cargan TFS y Git y se recuperan los fragmentos de Meet vía RAG. Si falta una
-   fuente o está corrupta, se escala de inmediato **sin llamar al LLM**.
-2. **REASON**: el LLM propone discrepancias y casos; cada caso trae `evidence_quote`, una cita
-   literal de la fuente que indica su `grounding_source`.
-3. **VERIFY**: cada cita se busca en el texto real de esa fuente (ignorando mayúsculas, tildes y
-   espacios; se permiten elipsis). Los casos sin respaldo se descartan y quedan en el Audit Trail.
+1. **RECAP**: se cargan TFS y Git, se recuperan los fragmentos de Meet vía RAG y se detectan las
+   fuentes faltantes o corruptas, que se le pasan al LLM como advertencias.
+2. **REASON**: el agente decide si escala a un humano (`escalate_to_human` + `escalation_reason`)
+   o propone discrepancias y casos; cada caso trae `evidence_quote`, una cita literal de la
+   fuente que indica su `grounding_source`.
+3. **VERIFY**: si el agente escaló, se escala sin casos. Si propuso un plan, cada cita se busca en
+   el texto real de esa fuente (ignorando mayúsculas, tildes y espacios; se permiten elipsis); una
+   fuente corrupta nunca sirve de respaldo. Los casos sin respaldo se descartan y quedan en el
+   Audit Trail.
 
 `confidence_score = 0.5 · fuentes válidas / 3 + 0.5 · casos con respaldo / casos propuestos`.
-Con confianza ≥ 0.85 el plan queda `READY_FOR_QA`; si no, se escala sin casos. Los validadores
+Con confianza ≥ 0.85 el plan queda `READY_FOR_QA`; si no, se escala sin casos aunque el agente
+no lo haya pedido (barrera de seguridad). Los validadores
 de `QATestPlanOutput` impiden planes incoherentes (p. ej. un escalado con casos de prueba).
 
 En las preguntas, una respuesta solo se acepta si todas sus citas aparecen en las fuentes; si

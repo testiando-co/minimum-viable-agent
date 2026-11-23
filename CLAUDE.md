@@ -15,7 +15,10 @@ Agente que asiste a un ingeniero de QA: analiza un Work Item (WI) a partir de 3 
 - `src/schemas.py` — `TestCaseItem` y `QATestPlanOutput`
 - `src/logger.py` — Audit Trail: trace_id, timestamp, reasoning_trace, tools, output
 - `src/tools_and_rag.py` — `fetch_tfs_and_git_data(wi_id) -> str` y `search_meet_transcript_rag(wi_id, query) -> str`
-- `src/main_mva.py` — agente con Instruction Contract (IC) y bucle FCoT (Recap → Reason → Verify)
+- `src/main_mva.py` — CLI y API pública (`generate_test_plan`, `answer_question`, `run_test_plan`, `run_question`)
+- `src/agent_loop/` — el agente como grafo de LangGraph: `sense` → `plan` → `reason` → `verify` → `act`, más `memory.py` (corto plazo en memoria, largo plazo en Chroma), `prompts.py` (IC), `llm.py` y `graph.py`. Los nodos que llaman al LLM deben recibir y pasar `config` para quedar en la misma traza de LangSmith.
+- `src/grounding.py`, `src/evaluation.py`, `evals/golden_set.json` — grounding verificable y evaluación (Nivel 4)
+- `chroma.db/` — vector store persistente (no se sube); los tests usan una carpeta temporal (`tests/conftest.py`)
 - `mocks/wi_<id>_*.json` — datos de prueba. **Nunca quemar datos en el código**: siempre leerlos de `mocks/`.
 - `tests/test_mva_day1.py` — solo las 5 pruebas de aceptación, contra el LLM real (`uv run pytest -v -m llm`).
 - `tests/test_unitarias.py` — tests unitarios de cada pieza, con LLM simulado y embeddings falsos (sin API key).
