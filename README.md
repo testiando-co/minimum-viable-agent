@@ -26,8 +26,8 @@ Se elige solo con `.env`:
 
 | Proveedor | Configuración en `.env` |
 |---|---|
-| Anthropic (por defecto) | `MVA_MODEL=anthropic:claude-opus-5-5` + `ANTHROPIC_API_KEY` |
-| Google Gemini | `MVA_MODEL=google_genai:gemini-3.5-flash-lite` + `GOOGLE_API_KEY` |
+| Google Gemini (recomendado, gratis) | `MVA_MODEL=google_genai:gemini-3.6-flash` + `GOOGLE_API_KEY` |
+| Anthropic | `MVA_MODEL=anthropic:claude-opus-5-5` + `ANTHROPIC_API_KEY` (es el modelo por defecto si no se define `MVA_MODEL`) |
 | Ollama local | `LOCAL_LLM=1` + `OLLAMA_MODEL` (p. ej. `gemma4`) y `OLLAMA_EMBEDDINGS_MODEL` (p. ej. `embeddinggemma`) |
 
 Con `LOCAL_LLM=1`, Ollama también genera los embeddings del RAG; si no, se usa FastEmbed local.
@@ -37,7 +37,8 @@ Resultado de las 5 pruebas de aceptación con el modelo real (`uv run pytest -v`
 
 | Modelo | Resultado |
 |---|---|
-| `google_genai:gemini-3.5-flash-lite` | 5/5 (el plan gratuito a veces responde 503 por alta demanda) |
+| `google_genai:gemini-3.6-flash` | 5/5, y las 3 trampas bien razonadas en todas las corridas (~15 s por plan) |
+| `google_genai:gemini-3.5-flash-lite` | 5/5, pero redacta al revés el caso del día 30 ("se aplica el recargo") y a veces una cita mal copiada hace escalar el plan |
 | `ollama:gemma4` | 4/5 (antes de aceptar `[...]` en las citas) |
 | `ollama:gemma3` | 3/5 |
 
@@ -47,7 +48,9 @@ Resultado de las 5 pruebas de aceptación con el modelo real (`uv run pytest -v`
 uv run python src/main_mva.py                     # plan de pruebas de todos los WI en mocks/
 uv run python src/main_mva.py WI-4052 WI-9999     # solo los WI indicados
 uv run python src/main_mva.py WI-4052 -q "¿Cuántos segundos dura la animación del spinner al pagar con Visa?"
-uv run pytest -v                                  # deterministas; los de `-m llm` se saltan sin ANTHROPIC_API_KEY
+uv run pytest -v                                  # todo: unitarias + las 5 de aceptación
+uv run pytest -v -m llm                           # solo las 5 pruebas de aceptación (tests/test_mva_day1.py)
+uv run pytest -v tests/test_unitarias.py          # solo las unitarias (LLM simulado, sin API key)
 uv run python src/evaluation.py                   # evaluación contra el conjunto dorado (llama al LLM)
 ```
 

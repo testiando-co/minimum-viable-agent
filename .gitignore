@@ -22,3 +22,24 @@ logs/
 
 # Modelo de embeddings descargado por FastEmbed
 .cache/
+
+# Variantes de .env con secretos (se versiona solo la plantilla)
+.env.*
+!.env.example
+
+# IDEs y editores
+.idea/
+.vscode/
+*.swp
+*~
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Caches de herramientas de Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/

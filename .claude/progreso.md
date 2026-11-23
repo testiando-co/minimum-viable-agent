@@ -41,16 +41,29 @@ agregaron para el Nivel 4.
 
 ## Proveedores probados (5 criterios de aceptación con el modelo real)
 
+Modelo en uso: **`google_genai:gemini-3.6-flash`** (desde el 2026-11-23, en `.env` y `.env.example`).
+
 | Modelo | Resultado | Notas |
 |---|---|---|
-| `google_genai:gemini-3.5-flash-lite` | 5/5, evaluación 1.0 en todas las métricas | El plan gratuito a veces responde 503 por alta demanda |
+| `google_genai:gemini-3.6-flash` | 5/5; trampas con criterio estricto 3/3 | **Recomendado.** Día 30 → "NO se aplica recargo" y trampa 3 como `bug_hunt` desde el diff en todas las corridas. ~15 s por plan |
+| `google_genai:gemini-4-hydrogen` | Trampas con criterio estricto 3/3 | Igual de bien, pero ~45 s por plan y parece experimental (límites más estrictos) |
+| `google_genai:gemini-3.5-flash` | Trampas con criterio estricto 2/3 | Una vez redactó mal el día 30 |
+| `google_genai:gemini-3.5-flash-lite` | 5/5 en pytest, pero día 30 correcto 0/3 | Escribe "se aplica el recargo" el día 30 (valida el bug); a veces copia "seja" por "sea" y el verificador descarta el caso del banner (1 de 12 corridas escaló). Ignora `temperature` |
 | `ollama:gemma4` | 4/5 | Falló la trampa 1 por `[...]` en la cita; ya corregido en el verificador |
 | `ollama:gemma3` | 3/5 | No llena discrepancias; respondió el spinner con un dato de otro tema |
+
+Criterio estricto (2026-11-23, 3 corridas por modelo): además de lo que exige `golden_set.json`, el
+caso del día 30 debe decir que **no** se aplica recargo y la trampa 3 debe venir del git diff
+(`GIT_DIFF_DISCREPANCY`). Con la key gratuita: `gemini-3.7-flash` y `3.8-flash` respondieron 503,
+`gemini-4-argon`/`carbon`/`neon` 429 (fuera del plan gratuito) y `gemini-2.5-*` 404 (retirados).
 
 ## Pendientes conocidos
 
 - La trampa 3 depende del comentario "BUG OCULTO": el mock no contiene `disablePayButton={false}`.
-- La evaluación no comprueba que el caso del día 30 diga que **no** se aplica recargo.
+- La evaluación es permisiva: no comprueba que el caso del día 30 diga que **no** se aplica recargo
+  ni que la trampa 3 venga del git diff (busca palabras, no razonamiento). Con gemini-3.6-flash
+  sale bien igual, pero pytest no detectaría una corrida mala.
+- `temperature` solo se fija con Ollama; con Gemini y Anthropic los resultados varían entre corridas.
 - La fecha de la metadata del RAG es la de modificación del archivo; tras un `git clone` todas
   coinciden y el factor de fecha no influye hasta ingresarlas a mano.
 - `langchain-community` (FAISS, FastEmbed) emite un aviso de *sunset*.

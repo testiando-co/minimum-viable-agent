@@ -12,7 +12,7 @@ Bucle FCoT registrado en el Audit Trail: RECAP → REASON → VERIFY.
 
 El modelo se elige con la variable de entorno MVA_MODEL en formato
 `proveedor:modelo` de LangChain (por defecto `anthropic:claude-opus-5-5`).
-Ejemplos: `anthropic:claude-opus-5-5`, `google_genai:gemini-3.5-flash-lite`.
+Recomendado: `google_genai:gemini-3.6-flash` (gratis). Otro ejemplo: `anthropic:claude-opus-5-5`.
 Con LOCAL_LLM=1 se usa Ollama local (OLLAMA_MODEL, por defecto `gemma3`).
 """
 

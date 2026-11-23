@@ -17,6 +17,8 @@ Agente que asiste a un ingeniero de QA: analiza un Work Item (WI) a partir de 3 
 - `src/tools_and_rag.py` — `fetch_tfs_and_git_data(wi_id) -> str` y `search_meet_transcript_rag(wi_id, query) -> str`
 - `src/main_mva.py` — agente con Instruction Contract (IC) y bucle FCoT (Recap → Reason → Verify)
 - `mocks/wi_<id>_*.json` — datos de prueba. **Nunca quemar datos en el código**: siempre leerlos de `mocks/`.
+- `tests/test_mva_day1.py` — solo las 5 pruebas de aceptación, contra el LLM real (`uv run pytest -v -m llm`).
+- `tests/test_unitarias.py` — tests unitarios de cada pieza, con LLM simulado y embeddings falsos (sin API key).
 
 ## Contratos (no cambiar sin acuerdo del equipo)
 
