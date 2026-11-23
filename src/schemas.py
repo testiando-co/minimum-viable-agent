@@ -115,8 +115,20 @@ class EvidencedTestCase(TestCaseItem):
 
 
 class LLMTestPlanDraft(BaseModel):
-    """Lo que produce el LLM; el estado y la confianza los calculan reglas verificables."""
+    """Lo que produce el LLM: su decisión de escalar, discrepancias y casos con evidencia.
 
+    El agente decide si escala; la confianza la calculan reglas verificables, que además
+    escalan si el plan no tiene respaldo suficiente (barrera de seguridad).
+    """
+
+    escalate_to_human: bool = Field(
+        description="True si falta una fuente o está corrupta/ininteligible, o si no hay datos "
+        "suficientes para un plan confiable. En ese caso test_cases va vacía."
+    )
+    escalation_reason: Optional[str] = Field(
+        description="Si escalas: qué fuente falta o está corrupta y por qué impide el plan. "
+        "Si no escalas: null."
+    )
     detected_discrepancies: List[str]
     test_cases: List[EvidencedTestCase]
 

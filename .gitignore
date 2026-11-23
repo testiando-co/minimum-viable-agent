@@ -43,3 +43,6 @@ Thumbs.db
 .ruff_cache/
 .coverage
 htmlcov/
+
+# Vector store persistente (RAG y memoria de largo plazo)
+chroma.db/

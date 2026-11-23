@@ -94,20 +94,25 @@ def valid_source_count(wi: WorkItemData) -> int:
 
 
 def verify_test_cases(wi: WorkItemData, cases: list[EvidencedTestCase]) -> GroundingReport:
-    """Acepta solo los casos cuya cita aparece en la fuente que dicen citar."""
+    """Acepta solo los casos cuya cita aparece en una fuente válida: la que dicen citar."""
     texts = source_texts(wi)
+    corrupt = {problem.split(":")[0] for problem in wi.missing_or_corrupt_sources()}
     report = GroundingReport(valid_sources=valid_source_count(wi), total_cases=len(cases))
     for case in cases:
         source = GROUNDING_TO_SOURCE[case.grounding_source]
-        if quote_in_source(case.evidence_quote, texts.get(source, "")):
-            report.grounded.append(TestCaseItem(**case.model_dump(exclude={"evidence_quote"})))
+        if source in corrupt:
+            reason = f"{source} falta o está corrupta: no sirve de respaldo"
+        elif not quote_in_source(case.evidence_quote, texts.get(source, "")):
+            reason = f"la cita no aparece en {source}"
         else:
-            report.rejected.append({
-                "test_id": case.test_id,
-                "grounding_source": case.grounding_source,
-                "evidence_quote": case.evidence_quote,
-                "reason": f"la cita no aparece en {source}",
-            })
+            report.grounded.append(TestCaseItem(**case.model_dump(exclude={"evidence_quote"})))
+            continue
+        report.rejected.append({
+            "test_id": case.test_id,
+            "grounding_source": case.grounding_source,
+            "evidence_quote": case.evidence_quote,
+            "reason": reason,
+        })
     return report
 
 

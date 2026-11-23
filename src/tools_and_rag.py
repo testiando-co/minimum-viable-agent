@@ -4,12 +4,17 @@ Nivel 0-1: carga y validación de los JSON de mocks/.
 Nivel 2: RAG híbrido sobre todos los archivos de mocks/:
   1. Split: cada fuente del WI (TFS, Meet, Git) se parte en chunks de CHUNK_SIZE
      caracteres con CHUNK_OVERLAP de solapamiento, con metadata (archivo, contexto, fecha).
-  2. Recuperación de candidatos con dos retrievers: embeddings locales (FAISS) y
-     términos (BM25).
+  2. Recuperación de candidatos con dos retrievers: embeddings locales en un vector
+     store persistente (Chroma, carpeta chroma.db/) y términos (BM25).
   3. Reranking: puntaje híbrido (embeddings + BM25) ajustado por la fecha (relevancia
      temporal) y se devuelven los TOP_K mejores.
+
+Chroma solo recalcula los embeddings cuando cambian los mocks, el split o el modelo de
+embeddings (se compara una huella guardada en la metadata de la colección).
+Las herramientas están decoradas con @traceable para verse dentro de la traza de LangSmith.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -22,6 +27,7 @@ from typing import Any, Optional
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langsmith import traceable
 from pydantic import ValidationError
 from rank_bm25 import BM25Okapi
 
@@ -78,6 +84,7 @@ def load_work_item(wi_id: str) -> Optional[WorkItemData]:
     return None if path is None else _read_work_item(path)
 
 
+@traceable(run_type="tool", name="fetch_tfs_and_git_data")
 def fetch_tfs_and_git_data(wi_id: str) -> str:
     """String JSON con `tfs_specification` y `git_commit_diff`, o el error controlado."""
     data = load_work_item(wi_id)
@@ -187,19 +194,77 @@ def split_work_item_file(
     return documents
 
 
-class HybridIndex:
-    """FAISS (embeddings) + BM25 (términos) sobre los mismos chunks, con reranking."""
+RAG_COLLECTION = "mva_rag"
 
-    def __init__(self, documents: list[Document], embeddings: Embeddings):
-        from langchain_community.vectorstores import FAISS
+
+def chroma_dir() -> Path:
+    """Carpeta del vector store persistente (RAG y memoria de largo plazo)."""
+    return Path(os.getenv("MVA_CHROMA_DIR", os.fspath(ROOT_DIR / "chroma.db")))
+
+
+@lru_cache(maxsize=4)
+def chroma_client(path: str):
+    """Un cliente persistente por carpeta, compartido por el RAG y la memoria."""
+    import chromadb
+
+    Path(path).mkdir(parents=True, exist_ok=True)
+    return chromadb.PersistentClient(path=path)
+
+
+def embeddings_id(embeddings: Embeddings) -> str:
+    """Identifica el modelo de embeddings (si cambia, hay que reindexar)."""
+    for attr in ("model", "model_name"):
+        if getattr(embeddings, attr, None):
+            return f"{type(embeddings).__name__}:{getattr(embeddings, attr)}"
+    return f"{type(embeddings).__name__}:{getattr(embeddings, 'size', '')}"
+
+
+def chroma_where(where: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """{"a": 1, "b": 2} -> filtro de Chroma ({"$and": [...]} si hay más de una condición)."""
+    conditions = [{key: value} for key, value in where.items()]
+    if not conditions:
+        return None
+    return conditions[0] if len(conditions) == 1 else {"$and": conditions}
+
+
+def _fingerprint(documents: list[Document], embeddings: Embeddings) -> str:
+    payload = [embeddings_id(embeddings)] + [
+        [d.metadata["chunk_id"], d.page_content, sorted(d.metadata.items())] for d in documents
+    ]
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, default=str).encode()).hexdigest()
+
+
+class HybridIndex:
+    """Chroma (embeddings, persistente) + BM25 (términos) sobre los mismos chunks, con reranking."""
+
+    def __init__(
+        self,
+        documents: list[Document],
+        embeddings: Embeddings,
+        persist_directory: Optional[Path] = None,
+        collection_name: str = RAG_COLLECTION,
+    ):
+        from langchain_chroma import Chroma
 
         if not documents:
             raise ValueError("No hay documentos para indexar")
         self.documents = documents
         self._position = {d.metadata["chunk_id"]: i for i, d in enumerate(documents)}
-        self.vectorstore = FAISS.from_documents(documents, embeddings)
         self.bm25 = BM25Okapi([_tokenize(d.page_content) or [""] for d in documents])
         self.newest = max(date.fromisoformat(d.metadata["date"]) for d in documents)
+
+        client = chroma_client(os.fspath(persist_directory or chroma_dir()))
+        fingerprint = _fingerprint(documents, embeddings)
+        self.vectorstore = Chroma(collection_name=collection_name, embedding_function=embeddings, client=client)
+        self.reindexed = (self.vectorstore._collection.metadata or {}).get("fingerprint") != fingerprint
+        if self.reindexed:
+            # Mocks, split o modelo de embeddings cambiaron: se recrea la colección.
+            self.vectorstore.delete_collection()
+            self.vectorstore = Chroma(
+                collection_name=collection_name, embedding_function=embeddings, client=client,
+                collection_metadata={"fingerprint": fingerprint},
+            )
+            self.vectorstore.add_documents(documents, ids=[d.metadata["chunk_id"] for d in documents])
 
     def _recency(self, doc: Document) -> float:
         """1.0 para el documento más reciente; la mitad cada RECENCY_HALF_LIFE_DAYS días."""
@@ -216,12 +281,14 @@ class HybridIndex:
         if not allowed:
             return []
 
-        # 1) Candidatos por embeddings (distancia L2 -> similitud en (0, 1]).
+        # 1) Candidatos por embeddings en Chroma (distancia -> similitud en (0, 1]).
         hits = self.vectorstore.similarity_search_with_score(
-            query, k=min(CANDIDATES_PER_RETRIEVER, len(allowed)),
-            filter=where or None, fetch_k=len(self.documents),
+            query, k=min(CANDIDATES_PER_RETRIEVER, len(allowed)), filter=chroma_where(where),
         )
-        emb = {self._position[d.metadata["chunk_id"]]: 1 / (1 + float(dist)) for d, dist in hits}
+        emb = {
+            self._position[d.metadata["chunk_id"]]: 1 / (1 + float(dist))
+            for d, dist in hits if d.metadata.get("chunk_id") in self._position
+        }
 
         # 2) Candidatos por términos (BM25).
         bm25_all = [float(s) for s in self.bm25.get_scores(_tokenize(query))]
@@ -287,6 +354,7 @@ def get_embeddings() -> Embeddings:
 def build_index(
     embeddings: Optional[Embeddings] = None,
     metadata_overrides: Optional[dict[str, dict[str, str]]] = None,
+    persist_directory: Optional[Path] = None,
 ) -> HybridIndex:
     """Indexa todos los archivos de mocks/.
 
@@ -298,12 +366,12 @@ def build_index(
     for path in list_mock_files():
         extra = overrides.get(os.path.basename(path), {})
         documents += split_work_item_file(path, context=extra.get("context"), date_=extra.get("date"))
-    return HybridIndex(documents, embeddings or get_embeddings())
+    return HybridIndex(documents, embeddings or get_embeddings(), persist_directory)
 
 
 @lru_cache(maxsize=1)
 def get_index() -> HybridIndex:
-    """Índice compartido del proceso (se construye una sola vez)."""
+    """Índice compartido del proceso (Chroma persistente; BM25 en memoria)."""
     return build_index()
 
 
@@ -313,6 +381,7 @@ def _fragment(doc: Document) -> dict[str, Any]:
     return {"text": doc.page_content, **{key: doc.metadata[key] for key in keys}}
 
 
+@traceable(run_type="retriever", name="search_meet_transcript_rag")
 def search_meet_transcript_rag(wi_id: str, query: str) -> str:
     """Fragmentos relevantes de la transcripción de Meet del WI (JSON), con sus puntajes.
 
@@ -331,6 +400,7 @@ def search_meet_transcript_rag(wi_id: str, query: str) -> str:
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+@traceable(run_type="retriever", name="search_work_item_rag")
 def search_work_item_rag(wi_id: str, query: str) -> str:
     """Fragmentos relevantes de todas las fuentes válidas del WI (JSON), con advertencias."""
     wi = load_work_item(wi_id)

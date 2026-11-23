@@ -12,11 +12,13 @@ logs/eval_<fecha>.json.
 
 import json
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 from langchain_core.language_models import BaseChatModel
+from langsmith import traceable
 
 from grounding import normalize
 from main_mva import llm_errors, model_name, run_question, run_test_plan
@@ -49,7 +51,8 @@ def _covers(plan: QATestPlanOutput, rule: dict[str, Any]) -> bool:
 
 
 def evaluate_plan(spec: dict[str, Any], llm: Optional[BaseChatModel] = None) -> dict[str, Any]:
-    plan, report = run_test_plan(spec["wi_id"], llm)
+    # Cada caso en su propia sesión: la memoria de corto plazo no se cruza entre casos.
+    plan, report = run_test_plan(spec["wi_id"], llm, session_id=str(uuid.uuid4()))
     checks = []
 
     if "expected_error" in spec:
@@ -87,7 +90,7 @@ def evaluate_plan(spec: dict[str, Any], llm: Optional[BaseChatModel] = None) -> 
 
 
 def evaluate_question(spec: dict[str, Any], llm: Optional[BaseChatModel] = None) -> dict[str, Any]:
-    answer, details = run_question(spec["wi_id"], spec["question"], llm)
+    answer, details = run_question(spec["wi_id"], spec["question"], llm, session_id=str(uuid.uuid4()))
     answered = details["grounded"]
     checks = [_check(
         "responde con citas verificadas" if spec["expect_found"] else "dice que no pudo verificarlo",
@@ -99,6 +102,7 @@ def evaluate_question(spec: dict[str, Any], llm: Optional[BaseChatModel] = None)
             "checks": checks, "grounding": details}
 
 
+@traceable(name="MVA evaluación", run_type="chain")
 def run_evaluation(llm: Optional[BaseChatModel] = None, golden_path: Path = GOLDEN_SET) -> dict[str, Any]:
     golden = json.loads(Path(golden_path).read_text(encoding="utf-8"))
     results = [evaluate_plan(spec, llm) for spec in golden.get("plans", [])]

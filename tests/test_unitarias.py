@@ -28,6 +28,7 @@ class ExplodingLLM:
     def __getattr__(self, name):
         raise AssertionError("no se debía invocar al LLM")
 
+
 # --- Contratos ------------------------------------------------------------------
 def test_confidence_score_fuera_de_rango_es_rechazado():
     with pytest.raises(ValidationError):
@@ -169,7 +170,8 @@ def test_main_sin_mocks_devuelve_error(monkeypatch):
 # --- Instruction Contract --------------------------------------------------------
 def test_prompt_incluye_las_tres_fuentes():
     rendered = PLAN_PROMPT.format(
-        wi_id="WI-4052", tfs_and_git="TFS_GIT", meet_fragments="MEET", threshold=0.85
+        wi_id="WI-4052", tfs_and_git="TFS_GIT", meet_fragments="MEET", memory="MEMORIA",
+        source_warnings="(ninguna)"
     )
     assert "TFS_GIT" in rendered and "MEET" in rendered
 
@@ -177,6 +179,7 @@ def test_prompt_incluye_las_tres_fuentes():
 def test_ic_contiene_reglas_de_negocio():
     for rule in ("prioridad sobre TFS", "ESCALATE_TO_HUMAN_MISSING_DATA", "NO inventes", "evidence_quote"):
         assert rule in INSTRUCTION_CONTRACT
+
 
 # =================================================================================
 # Nivel 2: RAG híbrido (embeddings falsos deterministas: sin red ni modelo)
@@ -355,17 +358,29 @@ GOOD_CASES = [
           "BUG OCULTO: No activó bloqueo de 3s"),
 ]
 GOOD_DRAFT = LLMTestPlanDraft(
+    escalate_to_human=False, escalation_reason=None,
     detected_discrepancies=["Recargo 8.5% (Meet) vs 5% (TFS)", ">= 30 en el código vs > 30",
                             "No se activó el bloqueo de 3 s pedido en Meet"],
     test_cases=GOOD_CASES,
 )
 INVENTED = _case("TC-99", "functional", "TFS", "Recargo del 12%", "el recargo es del 12% para todas las facturas")
+# Lo que decide un agente correcto ante WI-4099 (Meet corrupto y commit null).
+ESCALATE_DRAFT = LLMTestPlanDraft(
+    escalate_to_human=True,
+    escalation_reason="El audio de Meet está corrupto y el commit de Git es null: no hay datos para el plan",
+    detected_discrepancies=[], test_cases=[],
+)
+
+
+def _planned_wi(prompt):
+    return next(line for line in prompt.splitlines() if "Genera el plan de pruebas del" in line).split()[-1]
 
 
 def _good_responder(schema, prompt):
     if schema is LLMTestPlanDraft:
-        return GOOD_DRAFT
-    if "spinner" in prompt:
+        return ESCALATE_DRAFT if _planned_wi(prompt) == "WI-4099." else GOOD_DRAFT
+    question = next(line for line in prompt.splitlines() if "Pregunta del ingeniero de QA" in line)
+    if "spinner" in question:
         return GroundedAnswer(found=False, answer="El dato no aparece en los fragmentos.", citations=[])
     return GroundedAnswer(found=True, answer="La PO pidió un recargo del 8.5%.", citations=[
         {"source": "MEET_PO_DEMO", "quote": "el recargo por mora debe ser exactamente del 8.5%"}])
@@ -454,12 +469,35 @@ def test_plan_mayormente_inventado_escala_sin_casos(fake_index):
     assert plan.test_cases == [] and "1 de 3" in plan.human_escalation_reason
 
 
-def test_prueba2_wi_4099_escala_sin_invocar_al_llm():
-    plan = generate_test_plan("WI-4099", llm=ExplodingLLM())
+def test_prueba2_wi_4099_el_agente_decide_escalar(fake_index):
+    llm = FakeStructuredLLM(_good_responder)
+    plan = generate_test_plan("WI-4099", llm=llm)
     assert plan.status == "ESCALATE_TO_HUMAN_MISSING_DATA"
     assert plan.confidence_score < 0.85 and plan.test_cases == []
     reason = plan.human_escalation_reason.lower()
     assert "meet" in reason and "corrupto" in reason and "git" in reason and "null" in reason
+    # La decisión la tomó el agente: el LLM vio las fuentes y sus advertencias.
+    assert len(llm.prompts) == 1 and "el audio/transcripción de Meet está corrupto" in llm.prompts[0]
+
+
+def test_prueba2_barrera_si_el_agente_no_escala_un_wi_incompleto(fake_index):
+    """Si el agente propone un plan para WI-4099, las reglas escalan igual (no hay respaldo)."""
+    reckless = LLMTestPlanDraft(
+        escalate_to_human=False, escalation_reason=None, detected_discrepancies=[],
+        test_cases=[_case("TC-1", "functional", "MEET_PO_DEMO", "x", "grabacion_corrupta_audio_ininteligible"),
+                    _case("TC-2", "functional", "TFS", "Reembolso parcial de 500 USD",
+                          "Permitir reembolsos parciales hasta por $500 USD")],
+    )
+    plan, report = run_test_plan("WI-4099", llm=FakeStructuredLLM(lambda schema, prompt: reckless))
+    assert plan.status == "ESCALATE_TO_HUMAN_MISSING_DATA" and plan.test_cases == []
+    assert plan.confidence_score < 0.85 and "1 de 2" in plan.human_escalation_reason
+    assert "corrupta" in report.rejected[0]["reason"]  # una fuente corrupta no sirve de respaldo
+
+
+def test_el_agente_puede_escalar_aunque_los_datos_esten_completos(fake_index):
+    plan = generate_test_plan("WI-4052", llm=FakeStructuredLLM(lambda schema, prompt: ESCALATE_DRAFT))
+    assert plan.status == "ESCALATE_TO_HUMAN_MISSING_DATA" and plan.test_cases == []
+    assert plan.human_escalation_reason.startswith("El audio de Meet está corrupto")
 
 
 def test_prueba3_pregunta_sin_respuesta_en_las_fuentes(fake_index):
@@ -514,3 +552,105 @@ def test_evaluacion_detecta_trampa_faltante_y_alucinacion(fake_index):
     assert "Trampa 3: bloqueo de 3 segundos del botón Pagar" in failed
     assert "responde con citas verificadas" in failed  # la cita inventada no se acepta
     assert evaluation["summary"]["accuracy"] < 1.0
+
+
+# =================================================================================
+# Nivel 5: agent_loop (LangGraph), memoria y una sola traza por ejecución
+# =================================================================================
+import uuid
+
+from agent_loop.graph import build_graph, run_agent
+from agent_loop.memory import get_long_term_memory
+
+
+def _traced_runs(run):
+    """Ejecuta `run()` con LangSmith activado contra un cliente simulado y devuelve los runs enviados."""
+    from unittest.mock import MagicMock
+
+    from langchain_core.tracers.langchain import wait_for_all_tracers
+    from langsmith import tracing_context
+
+    client = MagicMock()
+    with tracing_context(enabled=True, client=client, project_name="tests"):
+        run()
+    wait_for_all_tracers()
+    return [call.kwargs for call in client.create_run.call_args_list]
+
+
+def test_grafo_tiene_la_anatomia_del_agente():
+    nodes = set(build_graph().get_graph().nodes)
+    assert {"sense", "plan", "reason", "verify", "act"} <= nodes
+
+
+def test_una_ejecucion_produce_una_sola_traza(fake_index):
+    runs = _traced_runs(lambda: generate_test_plan("WI-4052", llm=FakeStructuredLLM(_good_responder)))
+    assert len({r["trace_id"] for r in runs}) == 1           # una sola traza
+    roots = [r["name"] for r in runs if r.get("parent_run_id") is None]
+    assert roots == ["MVA plan de pruebas WI-4052"]           # con una sola raíz
+    names = {r["name"] for r in runs}
+    assert {"sense", "plan", "reason", "verify", "act"} <= names          # nodos del grafo
+    assert {"fetch_tfs_and_git_data", "search_meet_transcript_rag"} <= names  # herramientas anidadas
+
+
+def test_la_cli_agrupa_todos_los_wi_en_una_traza(fake_index, monkeypatch):
+    import main_mva
+
+    monkeypatch.setattr(main_mva, "generate_test_plan",
+                        lambda wi_id: main_mva.run_test_plan(wi_id, llm=FakeStructuredLLM(_good_responder))[0])
+    runs = _traced_runs(lambda: main_mva.main(["WI-4099", "WI-9999"]))
+    assert len({r["trace_id"] for r in runs}) == 1
+    assert [r["name"] for r in runs if r.get("parent_run_id") is None] == ["MVA CLI"]
+
+
+def test_el_escalado_pasa_por_reason(fake_index):
+    state = run_agent("plan", "WI-4099", llm=FakeStructuredLLM(_good_responder))
+    assert state["route"] == "llm" and state["draft"]["escalate_to_human"] is True
+    reasons = [s["detail"] for s in state["reasoning_trace"] if s["phase"] == "REASON"]
+    assert any("decisión del agente: ESCALAR" in r for r in reasons)
+
+
+def test_memoria_corto_plazo_recuerda_la_sesion(fake_index):
+    session, llm = str(uuid.uuid4()), FakeStructuredLLM(_good_responder)
+    answer_question("WI-4052", "¿Qué recargo pidió la PO?", llm=llm, session_id=session)
+    state = run_agent("question", "WI-4052", question="¿Y el color del banner?", llm=llm, session_id=session)
+    assert [t["request"] for t in state["history"]] == ["¿Qué recargo pidió la PO?", "¿Y el color del banner?"]
+    assert "¿Qué recargo pidió la PO?" in llm.prompts[-1]  # el LLM ve la conversación reciente
+
+
+def test_memoria_corto_plazo_no_se_cruza_entre_sesiones(fake_index):
+    llm = FakeStructuredLLM(_good_responder)
+    answer_question("WI-4052", "¿Qué recargo pidió la PO?", llm=llm, session_id="sesion-a")
+    state = run_agent("question", "WI-4052", question="¿Otra?", llm=llm, session_id="sesion-b")
+    assert [t["request"] for t in state["history"]] == ["¿Otra?"]
+
+
+def test_memoria_largo_plazo_guarda_y_recupera_ejecuciones(fake_index):
+    memory = get_long_term_memory()
+    generate_test_plan("WI-4052", llm=FakeStructuredLLM(_good_responder))
+    assert memory.count() == 1
+    # En otra sesión, el agente recupera la ejecución anterior desde Chroma.
+    state = run_agent("plan", "WI-4052", llm=FakeStructuredLLM(_good_responder), session_id="otra-sesion")
+    assert state["long_term_memory"] and state["long_term_memory"][0]["wi_id"] == "WI-4052"
+    assert "READY_FOR_QA" in state["long_term_memory"][0]["memory"]
+    assert memory.count() == 2
+
+
+def test_wi_inexistente_no_se_guarda_en_memoria(fake_index):
+    generate_test_plan("WI-9999", llm=ExplodingLLM())
+    assert get_long_term_memory().count() == 0
+
+
+def test_la_memoria_no_sirve_como_fuente_para_el_grounding(fake_index):
+    generate_test_plan("WI-4052", llm=FakeStructuredLLM(_good_responder))
+    recalled = get_long_term_memory().recall("WI-4052 plan de pruebas")[0]["memory"]
+    from_memory = _case("TC-M", "functional", "MEET_PO_DEMO", "x", recalled[:80])
+    assert verify_test_cases(load_work_item("WI-4052"), [from_memory]).grounded == []
+
+
+def test_chroma_persiste_y_solo_reindexa_si_cambian_los_datos(tmp_path):
+    fake = DeterministicFakeEmbedding(size=64)
+    assert rag.build_index(embeddings=fake, persist_directory=tmp_path).reindexed
+    assert not rag.build_index(embeddings=fake, persist_directory=tmp_path).reindexed  # reutiliza chroma.db
+    changed = rag.build_index(embeddings=fake, persist_directory=tmp_path,
+                              metadata_overrides={"wi_4052_happy_path.json": {"date": "2026-01-01"}})
+    assert changed.reindexed
