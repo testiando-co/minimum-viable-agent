@@ -11,7 +11,7 @@ for Building Multi-Agent Systems*. Cada nivel alcanzado tiene un tag anotado en 
 | 2 — RAG | `nivel-2` | WI descubiertos desde `mocks/`; RAG híbrido (FAISS — hoy Chroma — + BM25, reranking con fecha, k=5, chunks de 200 con 20 de solapamiento, metadata `source_file`/`context`/`date`) |
 | 3 — Tuning | — | Omitido a propósito (no aplica a este MVA) |
 | 4 — Grounding y evaluación | `nivel-4` | Citas verificadas contra la fuente; confianza por reglas; FCoT RECAP → REASON → VERIFY; validadores del plan; `evals/golden_set.json` + `src/evaluation.py`; proveedor elegible desde `.env` |
-| 5 — Agente único | (pendiente) | `src/agent_loop/` con LangGraph (sense → plan → reason → verify → act); memoria de corto plazo (InMemorySaver) y largo plazo (Chroma); RAG en Chroma persistente; una traza de LangSmith por ejecución |
+| 5 — Agente único | (en desarrollo, sin tag) | `src/agent_loop/` con LangGraph (sense → plan → reason → verify → act); memoria de corto plazo (InMemorySaver) y largo plazo (Chroma); RAG en Chroma persistente; una traza de LangSmith por ejecución |
 
 ## Arquitectura actual
 
@@ -48,6 +48,8 @@ la guía.
   falsos y Chroma en carpeta temporal (`tests/conftest.py`); las 5 de aceptación
   (`tests/test_mva_day1.py`) usan el modelo real, llevan `@pytest.mark.llm` y se saltan si el
   proveedor no está configurado.
+- En LangSmith, cada prueba de aceptación es una traza `pytest <test>` (tags `pytest`/`aceptacion`)
+  con el agente anidado; las unitarias nunca envían trazas (lo comprueba un test).
 
 ## Proveedores probados (5 criterios de aceptación con el modelo real)
 

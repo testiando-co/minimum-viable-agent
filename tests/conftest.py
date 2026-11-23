@@ -1,15 +1,73 @@
 """Configuración común de la suite.
 
-- Los tests no envían trazas a LangSmith (se fija antes de que main_mva cargue el .env).
+- Tests unitarios: nunca envían trazas a LangSmith.
+- Pruebas de aceptación (`@pytest.mark.llm`): si el `.env` tiene LANGSMITH_TRACING=true, cada
+  prueba es una traza en LangSmith ("pytest <nombre>", tags `pytest`/`aceptacion`) con las
+  ejecuciones del agente (`run_agent`) anidadas y el resultado (passed/failed).
 - Cada test usa su propia carpeta de Chroma: no se toca chroma.db/ del repositorio.
 """
 
 import os
 
-os.environ["LANGSMITH_TRACING"] = "false"
-os.environ["LANGCHAIN_TRACING_V2"] = "false"
+import pytest
+from dotenv import load_dotenv
 
-import pytest  # noqa: E402
+load_dotenv()
+
+
+def _langsmith_configurado() -> bool:
+    tracing = os.getenv("LANGSMITH_TRACING") or os.getenv("LANGCHAIN_TRACING_V2") or ""
+    return tracing.lower() == "true" and bool(os.getenv("LANGSMITH_API_KEY"))
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Guarda el resultado de la prueba para anotarlo en su traza."""
+    outcome = yield
+    report = outcome.get_result()
+    if report.when == "call":
+        item.mva_report = report
+
+
+@pytest.fixture(autouse=True)
+def traza_langsmith(request):
+    from langsmith import trace, tracing_context
+
+    if not (request.node.get_closest_marker("llm") and _langsmith_configurado()):
+        with tracing_context(enabled=False):
+            yield
+        return
+
+    root = trace(
+        name=f"pytest {request.node.name}", run_type="chain",
+        inputs={"test": request.node.nodeid}, tags=["pytest", "aceptacion"],
+        metadata={"test": request.node.name},
+    )
+    with tracing_context(enabled=True):
+        run = root.__enter__()
+        try:
+            yield
+        finally:
+            report = getattr(request.node, "mva_report", None)
+            passed = bool(report and report.passed)
+            run.add_outputs({"resultado": report.outcome if report else "sin resultado"})
+            if passed:
+                root.__exit__(None, None, None)
+            else:
+                error = AssertionError(str(report.longrepr) if report else "la prueba no terminó")
+                root.__exit__(AssertionError, error, None)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def enviar_trazas_al_final():
+    """Espera a que LangSmith reciba todas las trazas antes de cerrar pytest."""
+    yield
+    if _langsmith_configurado():
+        from langchain_core.tracers.langchain import wait_for_all_tracers
+        from langsmith.run_trees import get_cached_client
+
+        wait_for_all_tracers()
+        get_cached_client().flush()
 
 
 @pytest.fixture(autouse=True)

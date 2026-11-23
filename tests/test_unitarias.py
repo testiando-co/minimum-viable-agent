@@ -577,6 +577,21 @@ def _traced_runs(run):
     return [call.kwargs for call in client.create_run.call_args_list]
 
 
+def test_los_tests_unitarios_no_envian_trazas(fake_index, monkeypatch):
+    """Aunque el .env active LangSmith, conftest.py apaga el tracing en las unitarias."""
+    from unittest.mock import MagicMock
+
+    from langchain_core.tracers.langchain import wait_for_all_tracers
+    from langsmith import tracing_context
+
+    client = MagicMock()
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    with tracing_context(client=client):  # solo cambia el cliente; no toca `enabled`
+        generate_test_plan("WI-4052", llm=FakeStructuredLLM(_good_responder))
+    wait_for_all_tracers()
+    assert not client.create_run.called
+
+
 def test_grafo_tiene_la_anatomia_del_agente():
     nodes = set(build_graph().get_graph().nodes)
     assert {"sense", "plan", "reason", "verify", "act"} <= nodes

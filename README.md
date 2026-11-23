@@ -55,6 +55,11 @@ uv run pytest -v tests/test_unitarias.py          # solo las unitarias (LLM simu
 uv run python src/evaluation.py                   # evaluación contra el conjunto dorado (llama al LLM)
 ```
 
+Con `LANGSMITH_TRACING=true` en `.env`, cada prueba de aceptación queda como una traza en
+LangSmith (`pytest <nombre del test>`, tags `pytest` y `aceptacion`) con la ejecución del agente
+(`run_agent`: sense → plan → reason → verify → act) anidada y el resultado `passed`/`failed`. Las
+pruebas unitarias nunca envían trazas (`tests/conftest.py`).
+
 Los Work Items se descubren desde `mocks/`: cada archivo `wi_<id>_*.json` es el `WI-<id>`.
 Para agregar uno, basta con poner su JSON en esa carpeta.
 
