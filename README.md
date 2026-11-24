@@ -57,7 +57,7 @@ uv run python src/evaluation.py                   # evaluación contra el conjun
 
 Con `LANGSMITH_TRACING=true` en `.env`, cada prueba de aceptación queda como una traza en
 LangSmith (`pytest <nombre del test>`, tags `pytest` y `aceptacion`) con la ejecución del agente
-(`run_agent`: sense → plan → reason → verify → act) anidada y el resultado `passed`/`failed`. Las
+(`run_agent`: sense → reason → plan → act, en una o más vueltas) anidada y el resultado `passed`/`failed`. Las
 pruebas unitarias nunca envían trazas (`tests/conftest.py`).
 
 Los Work Items se descubren desde `mocks/`: cada archivo `wi_<id>_*.json` es el `WI-<id>`.
@@ -65,23 +65,36 @@ Para agregar uno, basta con poner su JSON en esa carpeta.
 
 ## Arquitectura del agente (Nivel 5)
 
-El agente es un grafo de LangGraph en `src/agent_loop/`, organizado según su anatomía:
+El agente es un **bucle** de LangGraph en `src/agent_loop/`, organizado según su anatomía
+(Sense → Reason → Plan → Act, cap. 4): ACT vuelve a SENSE hasta alcanzar el objetivo.
 
 ```
-START → sense → plan ─┬─ llm ───────→ reason → verify → act → END
-                      └─ not_found ─────────────────────→ act
+START → sense ─┬─ reason[LLM] → plan[LLM] → act ─┬─ objetivo alcanzado → END
+               │                                 └─ falta ─→ sense (otra vuelta)
+               └─ WI no existe ──────────────→ act → END (error controlado)
 ```
 
-| Módulo | Rol | Fase FCoT en el Audit Trail |
-|---|---|---|
-| `state.py` | Estado compartido del grafo | — |
-| `sense.py` | Percibir: TFS/Git, RAG y memoria | RECAP |
-| `plan.py` | Decidir el camino (WI inexistente → error controlado) | REASON |
-| `reason.py` | El agente decide: plan de pruebas o escalar a un humano | REASON |
-| `verify.py` | Grounding y confianza por reglas | VERIFY |
-| `act.py` | Entregar, escribir el Audit Trail y guardar en memoria | — |
-| `memory.py` | Memoria de corto y largo plazo | — |
-| `prompts.py` / `llm.py` / `graph.py` | Instruction Contract / modelo / grafo | — |
+| Módulo | Rol | Fase FCoT | LLM |
+|---|---|---|---|
+| `sense.py` | Percibir: WI, fuentes faltantes/corruptas, memoria y lo observado en la vuelta anterior | RECAP | no |
+| `reason.py` | Interpretar la situación frente al objetivo (`Assessment`: qué se sabe, qué falta) | REASON | sí |
+| `plan.py` | Convertir la evaluación en pasos con herramientas del catálogo (`ActionPlan`) | REASON | sí |
+| `act.py` | Ejecutar paso a paso; cada paso hace RECAP → REASON → VERIFY; entregar o repetir | RECAP/REASON/VERIFY | solo al redactar |
+| `verify.py` | Grounding, confianza y ¿objetivo alcanzado? (reglas) | VERIFY | no |
+| `tools.py` | Catálogo: `fetch_tfs_and_git_data`, `search_meet_transcript_rag`, `search_work_item_rag`, `recall_memory`, `draft_test_plan`, `draft_answer` | — | — |
+| `state.py` / `memory.py` / `prompts.py` / `llm.py` / `graph.py` | Estado y objetivo / memoria / IC / modelo / grafo | — | — |
+
+**Fractal Chain of Thought (cap. 13)**: el Instruction Contract va en cada llamada al LLM y el
+mismo ciclo RECAP → REASON → VERIFY se repite en dos niveles: en cada vuelta (sense → reason/plan
+→ comprobación del objetivo) y en cada paso que ejecuta ACT. El Audit Trail lo registra con el
+campo `level` (`vuelta 1`, `vuelta 1 · paso 2`, …).
+
+**Cuándo termina**: el objetivo lo comprueban reglas, no el LLM. En un plan, cuando el agente
+decide escalar o el plan tiene respaldo suficiente (confianza ≥ 0.85); en una pregunta, cuando
+todas las citas se verifican o el agente dice que no lo encontró. Si no, VERIFY deja feedback
+(p. ej. qué casos se descartaron y por qué) y el agente da otra vuelta para corregirse. Tras
+`MVA_MAX_ITERATIONS` vueltas (3 por defecto) se escala a un humano o se responde que no se pudo
+verificar. En el camino feliz son 3 llamadas al LLM por vuelta (reason, plan y redacción).
 
 **Memoria**
 - *Corto plazo* (en memoria): el checkpointer `InMemorySaver` de LangGraph guarda el estado de la
@@ -134,23 +147,23 @@ El modelo de embeddings se descarga la primera vez (~220 MB) en `.cache/fastembe
 
 **Grounding** (`src/grounding.py`): el agente decide; las reglas verifican.
 
-1. **RECAP**: se cargan TFS y Git, se recuperan los fragmentos de Meet vía RAG y se detectan las
-   fuentes faltantes o corruptas, que se le pasan al LLM como advertencias.
-2. **REASON**: el agente decide si escala a un humano (`escalate_to_human` + `escalation_reason`)
-   o propone discrepancias y casos; cada caso trae `evidence_quote`, una cita literal de la
-   fuente que indica su `grounding_source`.
+1. **RECAP**: se detectan las fuentes faltantes o corruptas y el agente reúne la evidencia con
+   sus herramientas (TFS y Git, fragmentos de Meet vía RAG); las advertencias llegan al LLM.
+2. **REASON**: al redactar, el agente decide si escala a un humano (`escalate_to_human` +
+   `escalation_reason`) o propone discrepancias y casos; cada caso trae `evidence_quote`, una
+   cita literal de la fuente que indica su `grounding_source`.
 3. **VERIFY**: si el agente escaló, se escala sin casos. Si propuso un plan, cada cita se busca en
    el texto real de esa fuente (ignorando mayúsculas, tildes y espacios; se permiten elipsis); una
-   fuente corrupta nunca sirve de respaldo. Los casos sin respaldo se descartan y quedan en el
-   Audit Trail.
+   fuente corrupta nunca sirve de respaldo. Los casos sin respaldo se descartan, quedan en el
+   Audit Trail y se le devuelven al agente como feedback para la siguiente vuelta.
 
 `confidence_score = 0.5 · fuentes válidas / 3 + 0.5 · casos con respaldo / casos propuestos`.
-Con confianza ≥ 0.85 el plan queda `READY_FOR_QA`; si no, se escala sin casos aunque el agente
-no lo haya pedido (barrera de seguridad). Los validadores
+Con confianza ≥ 0.85 el plan queda `READY_FOR_QA`; si no, el agente da otra vuelta y, si se
+agotan las vueltas, se escala sin casos aunque no lo haya pedido (barrera de seguridad). Los validadores
 de `QATestPlanOutput` impiden planes incoherentes (p. ej. un escalado con casos de prueba).
 
 En las preguntas, una respuesta solo se acepta si todas sus citas aparecen en las fuentes; si
-no, el agente responde que *no pudo verificar esa información en las fuentes del WI y no está
+no, el agente lo intenta de nuevo y, al agotar las vueltas, responde que *no pudo verificar esa información en las fuentes del WI y no está
 seguro de que exista*, sin agregar el texto no verificado del LLM.
 
 **Evaluación** (`src/evaluation.py`): corre el agente contra `evals/golden_set.json` (las 3

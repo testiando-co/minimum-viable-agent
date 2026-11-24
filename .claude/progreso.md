@@ -11,13 +11,15 @@ for Building Multi-Agent Systems*. Cada nivel alcanzado tiene un tag anotado en 
 | 2 — RAG | `nivel-2` | WI descubiertos desde `mocks/`; RAG híbrido (FAISS — hoy Chroma — + BM25, reranking con fecha, k=5, chunks de 200 con 20 de solapamiento, metadata `source_file`/`context`/`date`) |
 | 3 — Tuning | — | Omitido a propósito (no aplica a este MVA) |
 | 4 — Grounding y evaluación | `nivel-4` | Citas verificadas contra la fuente; confianza por reglas; FCoT RECAP → REASON → VERIFY; validadores del plan; `evals/golden_set.json` + `src/evaluation.py`; proveedor elegible desde `.env` |
-| 5 — Agente único | (en desarrollo, sin tag) | `src/agent_loop/` con LangGraph (sense → plan → reason → verify → act); memoria de corto plazo (InMemorySaver) y largo plazo (Chroma); RAG en Chroma persistente; una traza de LangSmith por ejecución |
+| 5 — Agente único | (en desarrollo, sin tag) | `src/agent_loop/` con LangGraph: bucle sense → reason (LLM) → plan (LLM) → act ↺ hasta el objetivo, FCoT fractal; memoria de corto plazo (InMemorySaver) y largo plazo (Chroma); RAG en Chroma persistente; una traza de LangSmith por ejecución |
 
 ## Arquitectura actual
 
-- `src/agent_loop/`: grafo de LangGraph. `sense` (RECAP: TFS/Git, RAG, memoria) → `plan` (REASON:
-  `not_found` / `llm`) → `reason` (LLM + IC) → `verify` (grounding) → `act` (Audit Trail
-  y memoria). `memory.py`: corto plazo con `InMemorySaver` (campo `history`, un thread por sesión) y
+- `src/agent_loop/`: bucle de LangGraph. `sense` (RECAP: WI, fuentes, memoria, observaciones y
+  feedback) → `reason` (LLM: `Assessment`) → `plan` (LLM: `ActionPlan` con herramientas de
+  `tools.py`) → `act` (ejecuta cada paso con RECAP → REASON → VERIFY; redacta con el LLM;
+  `verify.check_goal` decide con reglas si termina o vuelve a `sense`). Máx. `MVA_MAX_ITERATIONS`
+  (3). `memory.py`: corto plazo con `InMemorySaver` (campo `history`, un thread por sesión) y
   largo plazo en Chroma (`mva_long_term_memory`). `prompts.py`: IC. `llm.py`: proveedor.
 - `src/main_mva.py`: CLI y API pública; la CLI es una sola traza (`MVA CLI`).
 - `src/schemas.py`: entrada (mocks), contratos con validadores y borradores del LLM con
@@ -34,6 +36,12 @@ la guía.
 ## Decisiones clave
 
 - El LLM **no** decide `status` ni `confidence_score`: los calculan reglas verificables.
+- El bucle sigue la anatomía del cap. 4 (Reason y Plan con el LLM, Act ejecuta herramientas y
+  su resultado se percibe en la siguiente vuelta) y el FCoT del cap. 13 (IC en cada llamada y
+  RECAP → REASON → VERIFY por vuelta y por paso, con `level` en el Audit Trail). ACT solo llama
+  al LLM en los pasos de redacción: 3 llamadas por vuelta en el camino feliz.
+- Que el objetivo se alcanzó lo deciden reglas (grounding y confianza), no el LLM; si no, el
+  feedback de VERIFY (casos descartados y por qué) vuelve a REASON y PLAN en la vuelta siguiente.
 - Escalar a un humano lo decide el agente (LLM con `escalate_to_human`); las reglas son una
   barrera: si la confianza no llega a 0.85 se escala igual, y una fuente corrupta nunca sirve de
   respaldo para un caso.
@@ -63,6 +71,15 @@ Modelo en uso: **`google_genai:gemini-3.6-flash`** (desde el 2026-11-23, en `.en
 | `google_genai:gemini-3.5-flash-lite` | 5/5 en pytest, pero día 30 correcto 0/3 | Escribe "se aplica el recargo" el día 30 (valida el bug); a veces copia "seja" por "sea" y el verificador descarta el caso del banner (1 de 12 corridas escaló). Ignora `temperature` |
 | `ollama:gemma4` | 4/5 | Falló la trampa 1 por `[...]` en la cita; ya corregido en el verificador |
 | `ollama:gemma3` | 3/5 | No llena discrepancias; respondió el spinner con un dato de otro tema |
+
+Con el bucle FCoT (2026-11-23, `gemini-3.5-flash-lite`): 5/5 en ~56 s, todas en **1 vuelta**.
+WI-4052 → `READY_FOR_QA` con 4/4 citas verificadas (confianza 1.0) y la trampa 3 como `bug_hunt`
+desde el git diff; WI-4099 → el agente decidió escalar; spinner → "no pude verificar". Lo que
+aporta el FCoT: PLAN eligió reunir TFS/Git y Meet antes de redactar, y cada paso quedó verificado
+en el Audit Trail. Lo que **no** corrigió: el caso del día 30 sigue diciendo "se aplica el
+recargo" (las reglas verifican la cita, no el sentido del `then_expected`). Una cita mal copiada
+ahora da otra vuelta con feedback en vez de escalar de inmediato (cubierto por tests unitarios; no
+ocurrió en esta corrida).
 
 Criterio estricto (2026-11-23, 3 corridas por modelo): además de lo que exige `golden_set.json`, el
 caso del día 30 debe decir que **no** se aplica recargo y la trampa 3 debe venir del git diff
