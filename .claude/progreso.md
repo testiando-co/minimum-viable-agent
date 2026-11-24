@@ -40,6 +40,12 @@ la guía.
   su resultado se percibe en la siguiente vuelta) y el FCoT del cap. 13 (IC en cada llamada y
   RECAP → REASON → VERIFY por vuelta y por paso, con `level` en el Audit Trail). ACT solo llama
   al LLM en los pasos de redacción: 3 llamadas por vuelta en el camino feliz.
+- ACT ejecuta un paso del plan por nodo (`act` ↺ `act`): el checkpointer guarda `step_index` y
+  `completed_steps` tras cada paso. Ante un error del LLM, `run_agent` espera
+  `MVA_PLAN_RETRY_DELAY` (10 s por defecto, luego el doble; 2 reintentos) y retoma con
+  `graph.invoke(None, config)` desde el paso pendiente, sin repetir herramientas ni llamadas.
+- Las unitarias fijan `MVA_MAX_ITERATIONS=3` y `MVA_PLAN_RETRY_DELAY=0` en `conftest.py`: no
+  dependen del `.env`.
 - Que el objetivo se alcanzó lo deciden reglas (grounding y confianza), no el LLM; si no, el
   feedback de VERIFY (casos descartados y por qué) vuelve a REASON y PLAN en la vuelta siguiente.
 - Escalar a un humano lo decide el agente (LLM con `escalate_to_human`); las reglas son una
@@ -61,7 +67,11 @@ la guía.
 
 ## Proveedores probados (5 criterios de aceptación con el modelo real)
 
-Modelo en uso: **`google_genai:gemini-3.6-flash`** (desde el 2026-11-23, en `.env` y `.env.example`).
+Modelo por defecto: **`openrouter:openrouter/auto`** (en el código y en `.env.example`, con
+`OPENROUTER_API_KEY`). OpenRouter elige el modelo en cada llamada y, con
+`openrouter_provider={"require_parameters": True}`, solo enruta a modelos que soportan
+`response_format` (json_schema). Como el modelo puede variar entre llamadas, los resultados
+también. Aún sin corrida de las 5 de aceptación con este modelo.
 
 | Modelo | Resultado | Notas |
 |---|---|---|
@@ -106,4 +116,6 @@ caso del día 30 debe decir que **no** se aplica recargo y la trampa 3 debe veni
 - La memoria de largo plazo crece sin límite y puede influir en evaluaciones repetidas.
 - Falta la explicación por archivo del concepto del Día 01 que aplica (pedida en `INSTRUCTIONS.md`
   para el video).
+- El checkpointer es en memoria: un reintento retoma dentro del mismo proceso, pero no después
+  de cerrar la CLI (haría falta un checkpointer persistente, p. ej. SQLite).
 - PR `dev` → `main` pendiente.

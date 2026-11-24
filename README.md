@@ -27,8 +27,9 @@ Se elige solo con `.env`:
 
 | Proveedor | Configuración en `.env` |
 |---|---|
-| Google Gemini (recomendado, gratis) | `MVA_MODEL=google_genai:gemini-3.6-flash` + `GOOGLE_API_KEY` |
-| Anthropic | `MVA_MODEL=anthropic:claude-opus-5-5` + `ANTHROPIC_API_KEY` (es el modelo por defecto si no se define `MVA_MODEL`) |
+| OpenRouter (por defecto) | `MVA_MODEL=openrouter:openrouter/auto` + `OPENROUTER_API_KEY` (es el modelo por defecto si no se define `MVA_MODEL`; OpenRouter elige el modelo y solo enruta a los que soportan salida `json_schema`) |
+| Google Gemini (gratis) | `MVA_MODEL=google_genai:gemini-3.6-flash` + `GOOGLE_API_KEY` |
+| Anthropic | `MVA_MODEL=anthropic:claude-opus-5-5` + `ANTHROPIC_API_KEY` |
 | Ollama local | `LOCAL_LLM=1` + `OLLAMA_MODEL` (p. ej. `gemma4`) y `OLLAMA_EMBEDDINGS_MODEL` (p. ej. `embeddinggemma`) |
 
 Con `LOCAL_LLM=1`, Ollama también genera los embeddings del RAG; si no, se usa FastEmbed local.
@@ -76,8 +77,9 @@ El agente es un **bucle** de LangGraph en `src/agent_loop/`, organizado según s
 (Sense → Reason → Plan → Act, cap. 4): ACT vuelve a SENSE hasta alcanzar el objetivo.
 
 ```
-START → sense ─┬─ reason[LLM] → plan[LLM] → act ─┬─ objetivo alcanzado → END
-               │                                 └─ falta ─→ sense (otra vuelta)
+START → sense ─┬─ reason[LLM] → plan[LLM] → act ─┬─ quedan pasos ──────→ act (un paso por nodo)
+               │                                 ├─ objetivo alcanzado → END
+               │                                 └─ falta ─────────────→ sense (otra vuelta)
                └─ WI no existe ──────────────→ act → END (error controlado)
 ```
 
@@ -102,6 +104,14 @@ todas las citas se verifican o el agente dice que no lo encontró. Si no, VERIFY
 (p. ej. qué casos se descartaron y por qué) y el agente da otra vuelta para corregirse. Tras
 `MVA_MAX_ITERATIONS` vueltas (3 por defecto) se escala a un humano o se responde que no se pudo
 verificar. En el camino feliz son 3 llamadas al LLM por vuelta (reason, plan y redacción).
+
+**Checkpoint por paso y reintentos**: ACT ejecuta **un paso del plan por nodo**, así que el
+checkpointer (`InMemorySaver`) guarda después de cada paso qué se hizo (`completed_steps`) y cuál
+sigue (`step_index`). Si el LLM falla (p. ej. un `429` del plan gratuito al redactar), `run_agent`
+espera `MVA_PLAN_RETRY_DELAY` segundos (10 por defecto; luego el doble) y retoma con
+`graph.invoke(None, config)` desde el paso pendiente: no repite las herramientas ni las llamadas
+al LLM que ya se hicieron. Tras 2 reintentos fallidos, la CLI muestra el error controlado. El
+checkpointer vive en memoria: se retoma dentro del mismo proceso, no después de cerrar la CLI.
 
 **Memoria**
 - *Corto plazo* (en memoria): el checkpointer `InMemorySaver` de LangGraph guarda el estado de la

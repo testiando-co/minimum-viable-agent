@@ -14,8 +14,9 @@ Fractal Chain of Thought en el Audit Trail: RECAP → REASON → VERIFY en cada 
 paso que ejecuta ACT.
 
 El modelo se elige con MVA_MODEL en formato `proveedor:modelo` de LangChain (ver
-agent_loop/llm.py; por defecto `anthropic:claude-opus-5-5`). Recomendado:
-`google_genai:gemini-3.6-flash` (gratis). Con LOCAL_LLM=1 se usa Ollama local.
+agent_loop/llm.py; por defecto `openrouter:openrouter/auto`). Otras opciones:
+`google_genai:gemini-3.6-flash` (gratis), `anthropic:claude-opus-5-5`. Con LOCAL_LLM=1 se usa
+Ollama local.
 """
 
 import argparse
