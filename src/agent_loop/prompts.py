@@ -1,8 +1,15 @@
 """Instruction Contract (IC) y prompts del agente.
 
 El IC fija el rol, las fuentes permitidas, la jerarquía de conflictos, la prohibición de
-inventar y el formato de salida. La memoria (ejecuciones pasadas y conversación reciente)
-llega en su propia sección y es solo contexto: nunca es una fuente ni se puede citar.
+inventar, el bucle FCoT y el formato de salida. Todos los prompts lo llevan como mensaje de
+sistema, así el agente vuelve a su contrato en cada llamada (evita el *goal drift*).
+
+- REASON_PROMPT: evaluar la situación frente al objetivo (Assessment).
+- PLAN_PROMPT: armar el plan de acción con las herramientas del catálogo (ActionPlan).
+- TEST_PLAN_PROMPT / QUESTION_PROMPT: los pasos de redacción que ejecuta ACT.
+
+La memoria (ejecuciones pasadas y conversación reciente) llega en su propia sección y es
+solo contexto: nunca es una fuente ni se puede citar.
 """
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -40,20 +47,58 @@ Jerarquía y reglas obligatorias:
   parecido de otro tema (por ejemplo, otra duración u otro componente de la pantalla).
 - Memoria: la sección <memoria> resume ejecuciones anteriores y la conversación reciente.
   Úsala solo como contexto; no es una fuente, no se cita y no reemplaza a TFS, Meet ni Git.
+
+Bucle de trabajo (Fractal Chain of Thought): trabajas en vueltas hasta alcanzar el objetivo.
+En cada vuelta evalúas la situación (qué sabes y qué falta), planeas pasos con las
+herramientas del catálogo, se ejecutan y se verifican contra este contrato. Si una vuelta no
+alcanza el objetivo, recibes el feedback de la verificación y lo corriges en la siguiente.
+Solo cuentan como evidencia las salidas de las herramientas (observaciones); el plan siempre
+termina con el paso de redacción del entregable.
 """
+
+_FEEDBACK = "<feedback_de_la_vuelta_anterior>\n{feedback}\n</feedback_de_la_vuelta_anterior>\n\n"
+_MEMORY = "<memoria>\n{memory}\n</memoria>"
+
+REASON_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", INSTRUCTION_CONTRACT),
+        (
+            "human",
+            "Objetivo: {goal}\nVuelta {iteration} de {max_iterations}.\n\n"
+            "<recap>\n{recap}\n</recap>\n\n" + _MEMORY + "\n\n"
+            "Evalúa la situación frente al objetivo y el contrato: qué se sabe según lo observado, "
+            "qué falta, qué problemas hay en las fuentes y qué debe lograr esta vuelta.",
+        ),
+    ]
+)
 
 PLAN_PROMPT = ChatPromptTemplate.from_messages(
     [
         ("system", INSTRUCTION_CONTRACT),
         (
             "human",
+            "Objetivo: {goal}\nVuelta {iteration} de {max_iterations}.\n\n"
+            "<evaluacion>\n{assessment}\n</evaluacion>\n\n"
+            "<herramientas_disponibles>\n{catalog}\n</herramientas_disponibles>\n\n" + _FEEDBACK +
+            "Arma el plan de acción: pasos ordenados, cada uno con una herramienta del catálogo. "
+            "Reúne primero la evidencia que falte (no repitas búsquedas ya observadas salvo que el "
+            "feedback lo pida) y termina con el paso de redacción {draft_tool}.",
+        ),
+    ]
+)
+
+TEST_PLAN_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", INSTRUCTION_CONTRACT),
+        (
+            "human",
             "Genera el plan de pruebas del {wi_id}.\n\n"
-            "<tfs_y_git>\n{tfs_and_git}\n</tfs_y_git>\n\n"
-            "<meet_po_demo_rag>\n{meet_fragments}\n</meet_po_demo_rag>\n\n"
-            "Los fragmentos de Meet vienen de un RAG: cada uno trae su archivo de origen, "
-            "contexto, fecha y puntaje. Si hay un `warning`, la transcripción no es utilizable.\n\n"
+            "<observaciones>\n{observations}\n</observaciones>\n\n"
+            "Las observaciones son las salidas de las herramientas que ejecutaste (TFS y git diff, "
+            "fragmentos de Meet recuperados por RAG con su archivo de origen, contexto, fecha y "
+            "puntaje). Si una trae `warning`, esa fuente no es utilizable.\n\n"
             "<advertencias_de_las_fuentes>\n{source_warnings}\n</advertencias_de_las_fuentes>\n\n"
-            "<memoria>\n{memory}\n</memoria>",
+            + _FEEDBACK + _MEMORY,
         ),
     ]
 )
@@ -64,13 +109,12 @@ QUESTION_PROMPT = ChatPromptTemplate.from_messages(
         (
             "human",
             "Pregunta del ingeniero de QA sobre el {wi_id}: {question}\n\n"
-            "Responde en español, solo con lo que digan estos fragmentos recuperados por RAG. "
-            "Si la respuesta está, usa found=true y agrega en `citations` la fuente y una cita "
-            "literal de cada dato que hable exactamente de lo que se pregunta. Si no puedes "
-            "verificarlo en ningún fragmento, usa found=false, citations vacía y di que no "
-            "pudiste verificarlo y no estás seguro de que esa información exista.\n\n"
-            "<fragmentos_rag>\n{fragments}\n</fragmentos_rag>\n\n"
-            "<memoria>\n{memory}\n</memoria>",
+            "Responde en español, solo con lo que digan las observaciones (salidas de las "
+            "herramientas). Si la respuesta está, usa found=true y agrega en `citations` la fuente "
+            "y una cita literal de cada dato que hable exactamente de lo que se pregunta. Si no "
+            "puedes verificarlo, usa found=false, citations vacía y di que no pudiste verificarlo y "
+            "no estás seguro de que esa información exista.\n\n"
+            "<observaciones>\n{observations}\n</observaciones>\n\n" + _FEEDBACK + _MEMORY,
         ),
     ]
 )

@@ -1,31 +1,42 @@
-"""PLAN (FCoT: REASON) — decidir qué camino toma el agente.
+"""PLAN (FCoT: REASON) — la capa táctica: el LLM convierte la evaluación en pasos.
 
-- `not_found`: el WI no existe -> error controlado (no hay nada que analizar).
-- `llm`: el agente razona con el LLM sobre las fuentes (incluida la decisión de escalar a un
-  humano) y luego VERIFY comprueba el respaldo.
+Con el Assessment de REASON, el catálogo de herramientas del modo y el feedback de la vuelta
+anterior, el LLM produce un `ActionPlan`: pasos ordenados `{tool, query, purpose}` que ACT
+ejecuta. El último paso redacta el entregable (`draft_test_plan` o `draft_answer`).
 """
 
-from typing import Any
+import json
+from typing import Any, Callable, Optional
+
+from langchain_core.runnables import RunnableConfig
 
 import logger
+from agent_loop.llm import structured
+from agent_loop.prompts import PLAN_PROMPT
 from agent_loop.state import AgentState
+from agent_loop.tools import DRAFT_TOOL, catalog_for
+from schemas import ActionPlan
 
 
-def plan(state: AgentState) -> dict[str, Any]:
-    if state["work_item"] is None:
-        return {"route": "not_found"}
+def make_plan(llm: Optional[Any] = None) -> Callable[[AgentState, RunnableConfig], dict[str, Any]]:
+    """Crea el nodo PLAN con el LLM indicado (o el configurado en .env)."""
 
-    if state["mode"] == "plan":
-        detail = "plan: pedir al LLM que analice las fuentes y decida plan de pruebas o escalado"
-        if state["problems"]:
-            detail += f" (fuentes con problemas: {len(state['problems'])})"
-    else:
-        detail = "plan: pedir al LLM una respuesta con citas bajo el Instruction Contract"
-    return {
-        "route": "llm",
-        "reasoning_trace": state["reasoning_trace"] + [logger.step(state["trace_id"], "REASON", detail)],
-    }
+    def plan(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+        mode = state["mode"]
+        action_plan: ActionPlan = (PLAN_PROMPT | structured(llm, ActionPlan)).invoke({
+            "goal": state["goal"], "iteration": state["iteration"], "max_iterations": state["max_iterations"],
+            "assessment": json.dumps(state["assessment"], ensure_ascii=False, indent=2),
+            "catalog": catalog_for(mode), "draft_tool": DRAFT_TOOL[mode],
+            "feedback": "\n".join(state["feedback"]) or "(ninguno)",
+        }, config)
+        steps = "; ".join(
+            f"{i}. {s.tool}" + (f"({s.query})" if s.query else "") for i, s in enumerate(action_plan.steps, 1)
+        )
+        return {
+            "action_plan": action_plan.model_dump(),
+            "reasoning_trace": state["reasoning_trace"] + [
+                logger.step(state["trace_id"], "REASON", f"plan de acción: {steps or '(sin pasos)'}",
+                            f"vuelta {state['iteration']}")],
+        }
 
-
-def route_after_plan(state: AgentState) -> str:
-    return {"not_found": "act", "llm": "reason"}[state["route"]]
+    return plan

@@ -142,3 +142,37 @@ class GroundedAnswer(BaseModel):
     found: bool = Field(description="True solo si la respuesta está en los fragmentos.")
     answer: str
     citations: List[Citation]
+
+
+# --- Borradores del bucle del agente (REASON y PLAN) -------------------------------------
+ToolName = Literal[
+    "fetch_tfs_and_git_data", "search_meet_transcript_rag", "search_work_item_rag",
+    "recall_memory", "draft_test_plan", "draft_answer",
+]
+
+
+class Assessment(BaseModel):
+    """REASON: lo que el agente entiende de la situación frente al objetivo."""
+
+    recap: str = Field(description="Qué se sabe hasta ahora del WI frente al objetivo, según lo observado.")
+    gaps: List[str] = Field(description="Información que falta para cumplir el objetivo (vacía si no falta nada).")
+    source_problems: List[str] = Field(
+        description="Fuentes faltantes, corruptas o contradictorias detectadas (vacía si no hay)."
+    )
+    next_objective: str = Field(description="Qué debe lograr esta vuelta del bucle.")
+
+
+class PlanStep(BaseModel):
+    tool: ToolName = Field(description="Herramienta del catálogo que ejecuta este paso.")
+    query: Optional[str] = Field(
+        description="Consulta para las herramientas de búsqueda o de memoria; null para las demás."
+    )
+    purpose: str = Field(description="Para qué sirve este paso frente al objetivo.")
+
+
+class ActionPlan(BaseModel):
+    """PLAN: pasos ordenados que ACT ejecuta; el último redacta el entregable."""
+
+    steps: List[PlanStep] = Field(
+        description="Pasos ordenados. El último debe redactar el entregable (draft_test_plan o draft_answer)."
+    )

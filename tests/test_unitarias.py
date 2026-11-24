@@ -11,7 +11,7 @@ import os
 import pytest
 from pydantic import ValidationError
 
-from main_mva import INSTRUCTION_CONTRACT, PLAN_PROMPT, answer_question, generate_test_plan
+from main_mva import INSTRUCTION_CONTRACT, TEST_PLAN_PROMPT, answer_question, generate_test_plan
 from schemas import QATestPlanOutput, TestCaseItem, WorkItemFile
 from tools_and_rag import (
     MOCKS_DIR,
@@ -168,12 +168,12 @@ def test_main_sin_mocks_devuelve_error(monkeypatch):
 
 
 # --- Instruction Contract --------------------------------------------------------
-def test_prompt_incluye_las_tres_fuentes():
-    rendered = PLAN_PROMPT.format(
-        wi_id="WI-4052", tfs_and_git="TFS_GIT", meet_fragments="MEET", memory="MEMORIA",
-        source_warnings="(ninguna)"
+def test_prompt_de_redaccion_incluye_observaciones_advertencias_y_feedback():
+    rendered = TEST_PLAN_PROMPT.format(
+        wi_id="WI-4052", observations="OBSERVACIONES", memory="MEMORIA",
+        source_warnings="ADVERTENCIAS", feedback="FEEDBACK",
     )
-    assert "TFS_GIT" in rendered and "MEET" in rendered
+    assert all(x in rendered for x in ("OBSERVACIONES", "ADVERTENCIAS", "FEEDBACK", "MEMORIA"))
 
 
 def test_ic_contiene_reglas_de_negocio():
@@ -307,7 +307,8 @@ def test_rag_wi_4099_excluye_fuentes_corruptas(fake_index):
 def test_answer_question_le_pasa_al_llm_los_fragmentos_rag(fake_index):
     llm = FakeStructuredLLM(lambda schema, prompt: GroundedAnswer(found=False, answer="", citations=[]))
     answer_question("WI-4052", "¿spinner con Visa?", llm=llm)
-    assert "fragmentos_rag" in llm.prompts[0] and "source_file" in llm.prompts[0]
+    draft_prompt = llm.draft_prompts()[0]
+    assert "<observaciones>" in draft_prompt and "source_file" in draft_prompt
 
 
 @pytest.mark.skipif(not os.getenv("MVA_TEST_EMBEDDINGS"), reason="define MVA_TEST_EMBEDDINGS=1 para usar FastEmbed")
@@ -323,22 +324,48 @@ def test_rag_con_embeddings_reales_encuentra_el_recargo_de_meet():
 from evaluation import run_evaluation
 from grounding import compute_confidence, quote_in_source, verify_test_cases
 from main_mva import run_test_plan
-from schemas import EvidencedTestCase, GroundedAnswer, LLMTestPlanDraft
+from schemas import ActionPlan, Assessment, EvidencedTestCase, GroundedAnswer, LLMTestPlanDraft, PlanStep
+
+
+def default_loop_responder(schema, prompt):
+    """REASON y PLAN de un agente ordenado: reúne evidencia y termina redactando."""
+    if schema is Assessment:
+        return Assessment(recap="Se conoce el WI; falta reunir la evidencia.", gaps=["evidencia de las fuentes"],
+                          source_problems=[], next_objective="Reunir evidencia y redactar el entregable")
+    question = "draft_answer" in prompt  # el catálogo de PLAN solo trae las herramientas del modo
+    return ActionPlan(steps=[
+        PlanStep(tool="fetch_tfs_and_git_data", query=None, purpose="Leer TFS y el git diff"),
+        PlanStep(tool="search_work_item_rag" if question else "search_meet_transcript_rag",
+                 query="recargo por mora", purpose="Buscar la evidencia en las fuentes"),
+        PlanStep(tool="draft_answer" if question else "draft_test_plan", query=None, purpose="Redactar"),
+    ])
 
 
 class FakeStructuredLLM:
-    """LLM simulado: `responder(schema, prompt)` decide qué objeto devuelve."""
+    """LLM simulado.
 
-    def __init__(self, responder):
+    - `responder(schema, prompt)` decide los borradores (LLMTestPlanDraft o GroundedAnswer).
+    - `loop_responder(schema, prompt)` decide REASON (Assessment) y PLAN (ActionPlan).
+    """
+
+    def __init__(self, responder, loop_responder=None):
         self.responder = responder
+        self.loop_responder = loop_responder or default_loop_responder
         self.prompts: list[str] = []
+        self.calls: list[str] = []  # nombre del schema de cada llamada, en orden
 
     def with_structured_output(self, schema, **_):
         def respond(prompt_value):
             self.prompts.append(prompt_value.to_string())
+            self.calls.append(schema.__name__)
+            if schema in (Assessment, ActionPlan):
+                return self.loop_responder(schema, self.prompts[-1])
             return self.responder(schema, self.prompts[-1])
 
         return RunnableLambda(respond)
+
+    def draft_prompts(self) -> list[str]:
+        return [p for p, c in zip(self.prompts, self.calls) if c in ("LLMTestPlanDraft", "GroundedAnswer")]
 
 
 def _case(test_id, category, source, then, quote):
@@ -477,7 +504,8 @@ def test_prueba2_wi_4099_el_agente_decide_escalar(fake_index):
     reason = plan.human_escalation_reason.lower()
     assert "meet" in reason and "corrupto" in reason and "git" in reason and "null" in reason
     # La decisión la tomó el agente: el LLM vio las fuentes y sus advertencias.
-    assert len(llm.prompts) == 1 and "el audio/transcripción de Meet está corrupto" in llm.prompts[0]
+    drafts = llm.draft_prompts()
+    assert len(drafts) == 1 and "el audio/transcripción de Meet está corrupto" in drafts[0]
 
 
 def test_prueba2_barrera_si_el_agente_no_escala_un_wi_incompleto(fake_index):
@@ -592,9 +620,13 @@ def test_los_tests_unitarios_no_envian_trazas(fake_index, monkeypatch):
     assert not client.create_run.called
 
 
-def test_grafo_tiene_la_anatomia_del_agente():
-    nodes = set(build_graph().get_graph().nodes)
-    assert {"sense", "plan", "reason", "verify", "act"} <= nodes
+def test_grafo_tiene_la_anatomia_y_el_bucle_del_agente():
+    graph = build_graph().get_graph()
+    assert {"sense", "reason", "plan", "act"} <= set(graph.nodes)
+    edges = {(e.source, e.target) for e in graph.edges}
+    assert {("sense", "reason"), ("reason", "plan"), ("plan", "act")} <= edges
+    assert ("act", "sense") in edges and ("act", "__end__") in edges  # el bucle y su salida
+    assert ("sense", "act") in edges  # WI inexistente: directo a entregar el error
 
 
 def test_una_ejecucion_produce_una_sola_traza(fake_index):
@@ -603,7 +635,7 @@ def test_una_ejecucion_produce_una_sola_traza(fake_index):
     roots = [r["name"] for r in runs if r.get("parent_run_id") is None]
     assert roots == ["MVA plan de pruebas WI-4052"]           # con una sola raíz
     names = {r["name"] for r in runs}
-    assert {"sense", "plan", "reason", "verify", "act"} <= names          # nodos del grafo
+    assert {"sense", "reason", "plan", "act"} <= names                    # nodos del grafo
     assert {"fetch_tfs_and_git_data", "search_meet_transcript_rag"} <= names  # herramientas anidadas
 
 
@@ -617,11 +649,97 @@ def test_la_cli_agrupa_todos_los_wi_en_una_traza(fake_index, monkeypatch):
     assert [r["name"] for r in runs if r.get("parent_run_id") is None] == ["MVA CLI"]
 
 
-def test_el_escalado_pasa_por_reason(fake_index):
+def test_el_escalado_lo_decide_el_agente_al_redactar(fake_index):
     state = run_agent("plan", "WI-4099", llm=FakeStructuredLLM(_good_responder))
     assert state["route"] == "llm" and state["draft"]["escalate_to_human"] is True
+    assert state["iteration"] == 1 and state["end_reason"] == "el agente decidió escalar"
     reasons = [s["detail"] for s in state["reasoning_trace"] if s["phase"] == "REASON"]
     assert any("decisión del agente: ESCALAR" in r for r in reasons)
+
+
+# --- Bucle del agente (sense → reason → plan → act ↺) y FCoT fractal --------------------------
+def test_camino_feliz_termina_en_una_vuelta_con_tres_llamadas_al_llm(fake_index):
+    llm = FakeStructuredLLM(_good_responder)
+    state = run_agent("plan", "WI-4052", llm=llm)
+    assert state["goal_reached"] and state["iteration"] == 1
+    assert llm.calls == ["Assessment", "ActionPlan", "LLMTestPlanDraft"]  # reason, plan y redacción
+    assert state["result"]["status"] == "READY_FOR_QA"
+    assert [o["tool"] for o in state["observations"]] == ["fetch_tfs_and_git_data", "search_meet_transcript_rag"]
+
+
+def test_el_bucle_se_autocorrige_con_el_feedback_de_verify(fake_index):
+    """Vuelta 1: una cita inventada deja la confianza bajo 0.85 → otra vuelta con feedback."""
+    bad = GOOD_DRAFT.model_copy(update={"test_cases": [GOOD_CASES[0], INVENTED, INVENTED]})
+    drafts = iter([bad, GOOD_DRAFT])
+    llm = FakeStructuredLLM(lambda schema, prompt: next(drafts))
+    state = run_agent("plan", "WI-4052", llm=llm)
+    assert state["iteration"] == 2 and state["result"]["status"] == "READY_FOR_QA"
+    assert llm.calls == ["Assessment", "ActionPlan", "LLMTestPlanDraft"] * 2
+    # REASON y la redacción de la vuelta 2 ven el feedback de la verificación de la vuelta 1.
+    assert "descartado TC-99" in llm.prompts[3] and "descartado TC-99" in llm.draft_prompts()[1]
+    assert state["feedback"] == []
+
+
+def test_el_bucle_se_detiene_al_agotar_las_vueltas(fake_index, monkeypatch):
+    monkeypatch.setenv("MVA_MAX_ITERATIONS", "2")
+    bad = GOOD_DRAFT.model_copy(update={"test_cases": [INVENTED]})
+    llm = FakeStructuredLLM(lambda schema, prompt: bad)
+    state = run_agent("plan", "WI-4052", llm=llm)
+    assert state["iteration"] == 2 and llm.calls.count("LLMTestPlanDraft") == 2
+    assert state["result"]["status"] == "ESCALATE_TO_HUMAN_MISSING_DATA"
+    assert state["result"]["human_escalation_reason"].startswith("Tras 2 vueltas")
+
+
+def test_pregunta_con_citas_inventadas_agota_las_vueltas_y_no_alucina(fake_index):
+    liar = FakeStructuredLLM(lambda schema, prompt: GroundedAnswer(
+        found=True, answer="El spinner dura 2 segundos.",
+        citations=[{"source": "MEET_PO_DEMO", "quote": "el spinner dura 2 segundos con Visa"}]))
+    state = run_agent("question", "WI-4052", question="¿spinner?", llm=liar)
+    assert state["iteration"] == state["max_iterations"] == 3
+    assert state["result"].startswith("No pude verificar") and "2 segundos" not in state["result"]
+
+
+def test_un_plan_sin_paso_de_redaccion_da_otra_vuelta(fake_index):
+    plans = iter([
+        ActionPlan(steps=[PlanStep(tool="fetch_tfs_and_git_data", query=None, purpose="leer TFS")]),
+        default_loop_responder(ActionPlan, ""),
+    ])
+    llm = FakeStructuredLLM(_good_responder, loop_responder=lambda schema, prompt:
+                            default_loop_responder(schema, prompt) if schema is Assessment else next(plans))
+    state = run_agent("plan", "WI-4052", llm=llm)
+    assert state["iteration"] == 2 and state["result"]["status"] == "READY_FOR_QA"
+    assert any("no redactó el plan" in s["detail"] for s in state["reasoning_trace"])
+
+
+def test_verify_rechaza_pasos_que_no_sirven_para_el_modo(fake_index):
+    plan = ActionPlan(steps=[
+        PlanStep(tool="draft_answer", query=None, purpose="no corresponde en modo plan"),
+        PlanStep(tool="search_meet_transcript_rag", query=None, purpose="falta la query"),
+        PlanStep(tool="draft_test_plan", query=None, purpose="redactar"),
+    ])
+    llm = FakeStructuredLLM(_good_responder, loop_responder=lambda schema, prompt:
+                            default_loop_responder(schema, prompt) if schema is Assessment else plan)
+    state = run_agent("plan", "WI-4052", llm=llm)
+    rejected = [s["detail"] for s in state["reasoning_trace"] if s["detail"].startswith("paso rechazado")]
+    assert len(rejected) == 2 and "draft_answer no sirve" in rejected[0] and "query" in rejected[1]
+    assert "GroundedAnswer" not in llm.calls
+
+
+def test_audit_trail_fractal_recap_reason_verify_por_vuelta_y_por_paso(fake_index):
+    state = run_agent("plan", "WI-4052", llm=FakeStructuredLLM(_good_responder))
+    by_level: dict[str, list[str]] = {}
+    for s in state["reasoning_trace"]:
+        by_level.setdefault(s["level"], []).append(s["phase"])
+    assert by_level["vuelta 1"][:3] == ["RECAP", "REASON", "REASON"] and by_level["vuelta 1"][-1] == "VERIFY"
+    for paso in ("vuelta 1 · paso 1", "vuelta 1 · paso 2", "vuelta 1 · paso 3"):
+        assert by_level[paso] == ["RECAP", "REASON", "VERIFY"]
+
+
+def test_varias_vueltas_siguen_siendo_una_sola_traza(fake_index):
+    drafts = iter([GOOD_DRAFT.model_copy(update={"test_cases": [INVENTED]}), GOOD_DRAFT])
+    runs = _traced_runs(lambda: run_agent("plan", "WI-4052", llm=FakeStructuredLLM(lambda s, p: next(drafts))))
+    assert len({r["trace_id"] for r in runs}) == 1
+    assert [r["name"] for r in runs].count("sense") == 2  # dos vueltas dentro de la misma traza
 
 
 def test_memoria_corto_plazo_recuerda_la_sesion(fake_index):

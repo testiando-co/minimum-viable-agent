@@ -9,7 +9,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 LOG_FILE = Path(__file__).resolve().parent.parent / "logs" / "audit.jsonl"
 
@@ -21,10 +21,17 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def step(trace_id: str, phase: str, detail: str) -> dict[str, Any]:
-    """Un paso del razonamiento (RECAP, REASON o VERIFY)."""
-    _log.info("[%s] %s: %s", trace_id, phase, detail)
-    return {"phase": phase, "detail": detail, "timestamp": _now()}
+def step(trace_id: str, phase: str, detail: str, level: Optional[str] = None) -> dict[str, Any]:
+    """Un paso del razonamiento (RECAP, REASON o VERIFY).
+
+    `level` indica la profundidad en el FCoT fractal: "vuelta N" para el ciclo completo y
+    "vuelta N · paso M" para cada paso que ejecuta ACT.
+    """
+    _log.info("[%s] %s%s: %s", trace_id, f"{level} · " if level else "", phase, detail)
+    record = {"phase": phase, "detail": detail, "timestamp": _now()}
+    if level:
+        record["level"] = level
+    return record
 
 
 def tool(trace_id: str, name: str, args: dict[str, Any], result: str) -> dict[str, Any]:

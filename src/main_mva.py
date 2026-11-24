@@ -1,15 +1,17 @@
 """MVA de QA — punto de entrada (CLI) y API pública del agente.
 
-El agente vive en `agent_loop/` como grafo de LangGraph con la anatomía
-Sense → Plan → Reason → Verify → Act (ver agent_loop/__init__.py):
+El agente vive en `agent_loop/` como un bucle de LangGraph con la anatomía
+Sense → Reason → Plan → Act ↺ (vuelve a Sense hasta alcanzar el objetivo; ver agent_loop/__init__.py):
 
 - Nivel 1: modelo elegido desde .env e Instruction Contract (agent_loop/llm.py, prompts.py).
 - Nivel 2: RAG híbrido sobre mocks/ con Chroma persistente + BM25 (tools_and_rag.py).
 - Nivel 4: grounding verificable y confianza por reglas (grounding.py, agent_loop/verify.py).
-- Nivel 5: agente único orquestado con LangGraph, memoria de corto plazo (en memoria) y de
-  largo plazo (Chroma), y una sola traza de LangSmith por ejecución.
+- Nivel 5: agente único orquestado con LangGraph (REASON y PLAN con el LLM, ACT ejecuta las
+  herramientas), memoria de corto plazo (en memoria) y de largo plazo (Chroma), y una sola
+  traza de LangSmith por ejecución.
 
-Bucle FCoT registrado en el Audit Trail: RECAP → REASON → VERIFY.
+Fractal Chain of Thought en el Audit Trail: RECAP → REASON → VERIFY en cada vuelta y en cada
+paso que ejecuta ACT.
 
 El modelo se elige con MVA_MODEL en formato `proveedor:modelo` de LangChain (ver
 agent_loop/llm.py; por defecto `anthropic:claude-opus-5-5`). Recomendado:
@@ -40,6 +42,8 @@ from agent_loop.prompts import (  # noqa: E402,F401
     INSTRUCTION_CONTRACT,
     PLAN_PROMPT,
     QUESTION_PROMPT,
+    REASON_PROMPT,
+    TEST_PLAN_PROMPT,
     UNVERIFIED_ANSWER,
 )
 from grounding import GroundingReport  # noqa: E402
