@@ -626,6 +626,7 @@ def test_grafo_tiene_la_anatomia_y_el_bucle_del_agente():
     edges = {(e.source, e.target) for e in graph.edges}
     assert {("sense", "reason"), ("reason", "plan"), ("plan", "act")} <= edges
     assert ("act", "sense") in edges and ("act", "__end__") in edges  # el bucle y su salida
+    assert ("act", "act") in edges  # un paso del plan por nodo (un checkpoint por paso)
     assert ("sense", "act") in edges  # WI inexistente: directo a entregar el error
 
 
@@ -733,6 +734,83 @@ def test_audit_trail_fractal_recap_reason_verify_por_vuelta_y_por_paso(fake_inde
     assert by_level["vuelta 1"][:3] == ["RECAP", "REASON", "REASON"] and by_level["vuelta 1"][-1] == "VERIFY"
     for paso in ("vuelta 1 · paso 1", "vuelta 1 · paso 2", "vuelta 1 · paso 3"):
         assert by_level[paso] == ["RECAP", "REASON", "VERIFY"]
+
+
+# --- Checkpoint por paso y reintentos ------------------------------------------------------------
+def _flaky_draft(failures):
+    """Redacción que falla `failures` veces con un error del proveedor y luego responde bien."""
+    import httpx
+
+    state = {"left": failures}
+
+    def responder(schema, prompt):
+        if state["left"] > 0:
+            state["left"] -= 1
+            raise httpx.ConnectError("429 simulado del plan gratuito")
+        return _good_responder(schema, prompt)
+
+    return responder
+
+
+def test_el_checkpointer_guarda_cada_paso_y_cual_sigue(fake_index):
+    import httpx
+
+    from agent_loop.memory import SHORT_TERM_CHECKPOINTER
+
+    session = str(uuid.uuid4())
+    graph = build_graph(FakeStructuredLLM(_flaky_draft(1)), SHORT_TERM_CHECKPOINTER)
+    config = {"configurable": {"thread_id": session}}
+    from agent_loop.state import new_run
+
+    with pytest.raises(httpx.ConnectError):
+        graph.invoke(new_run("plan", "WI-4052", None, "fake", session), config)
+    snapshot = graph.get_state(config)
+    assert snapshot.next == ("act",)                    # el paso pendiente
+    assert snapshot.values["step_index"] == 2           # pasos 1 y 2 hechos; sigue el 3
+    assert [s["tool"] for s in snapshot.values["completed_steps"]] == [
+        "fetch_tfs_and_git_data", "search_meet_transcript_rag"]
+
+
+def test_el_reintento_retoma_desde_el_paso_pendiente_sin_repetir(fake_index):
+    llm = FakeStructuredLLM(_flaky_draft(1))
+    state = run_agent("plan", "WI-4052", llm=llm)
+    assert state["result"]["status"] == "READY_FOR_QA"
+    # reason y plan no se repiten; solo se reintenta la redacción que falló.
+    assert llm.calls == ["Assessment", "ActionPlan", "LLMTestPlanDraft", "LLMTestPlanDraft"]
+    # Las herramientas de los pasos 1 y 2 se ejecutaron una sola vez.
+    assert [t["name"] for t in state["tools"]] == ["fetch_tfs_and_git_data", "search_meet_transcript_rag"]
+    assert [s["step"] for s in state["completed_steps"]] == [1, 2, 3]
+
+
+def test_si_se_agotan_los_reintentos_la_cli_muestra_el_error_controlado(fake_index, monkeypatch, capsys):
+    import main_mva
+
+    monkeypatch.setattr(main_mva, "generate_test_plan",
+                        lambda wi_id: main_mva.run_test_plan(wi_id, llm=FakeStructuredLLM(_flaky_draft(99)))[0])
+    assert main_mva.main(["WI-4052"]) == 1
+    assert "Error al llamar al modelo" in capsys.readouterr().err
+
+
+def test_retry_delay_por_defecto_es_10_segundos(monkeypatch):
+    from agent_loop.graph import retry_delay
+
+    monkeypatch.delenv("MVA_PLAN_RETRY_DELAY", raising=False)
+    assert retry_delay() == 10
+    monkeypatch.setenv("MVA_PLAN_RETRY_DELAY", "3")
+    assert retry_delay() == 3
+
+
+def test_un_plan_con_demasiados_pasos_se_recorta(fake_index):
+    from agent_loop.state import MAX_STEPS_PER_PLAN
+
+    many = ActionPlan(steps=[PlanStep(tool="search_meet_transcript_rag", query=f"consulta {i}", purpose="buscar")
+                             for i in range(MAX_STEPS_PER_PLAN + 3)])
+    llm = FakeStructuredLLM(_good_responder, loop_responder=lambda schema, prompt:
+                            default_loop_responder(schema, prompt) if schema is Assessment else many)
+    trail = run_agent("plan", "WI-4052", llm=llm)["reasoning_trace"]
+    assert any(f"se recorta a {MAX_STEPS_PER_PLAN}" in s["detail"] for s in trail)
+    assert len([s for s in trail if s.get("level") == "vuelta 1 · paso 1"]) == 3
+    assert not any(s.get("level") == f"vuelta 1 · paso {MAX_STEPS_PER_PLAN + 1}" for s in trail)
 
 
 def test_varias_vueltas_siguen_siendo_una_sola_traza(fake_index):

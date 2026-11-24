@@ -13,7 +13,7 @@ from langchain_core.runnables import RunnableConfig
 import logger
 from agent_loop.llm import structured
 from agent_loop.prompts import PLAN_PROMPT
-from agent_loop.state import AgentState
+from agent_loop.state import MAX_STEPS_PER_PLAN, AgentState
 from agent_loop.tools import DRAFT_TOOL, catalog_for
 from schemas import ActionPlan
 
@@ -29,14 +29,18 @@ def make_plan(llm: Optional[Any] = None) -> Callable[[AgentState, RunnableConfig
             "catalog": catalog_for(mode), "draft_tool": DRAFT_TOOL[mode],
             "feedback": "\n".join(state["feedback"]) or "(ninguno)",
         }, config)
+        level = f"vuelta {state['iteration']}"
+        trail = list(state["reasoning_trace"])
+        if len(action_plan.steps) > MAX_STEPS_PER_PLAN:
+            trail.append(logger.step(state["trace_id"], "VERIFY",
+                                     f"el plan trae {len(action_plan.steps)} pasos; se recorta a {MAX_STEPS_PER_PLAN}", level))
+            action_plan.steps = action_plan.steps[:MAX_STEPS_PER_PLAN]
         steps = "; ".join(
             f"{i}. {s.tool}" + (f"({s.query})" if s.query else "") for i, s in enumerate(action_plan.steps, 1)
         )
-        return {
-            "action_plan": action_plan.model_dump(),
-            "reasoning_trace": state["reasoning_trace"] + [
-                logger.step(state["trace_id"], "REASON", f"plan de acción: {steps or '(sin pasos)'}",
-                            f"vuelta {state['iteration']}")],
-        }
+        trail.append(logger.step(state["trace_id"], "REASON", f"plan de acción: {steps or '(sin pasos)'}", level))
+        # Vuelta nueva: el avance de ACT empieza en el paso 1 y sin borrador.
+        return {"action_plan": action_plan.model_dump(), "step_index": 0, "completed_steps": [],
+                "draft": None, "reasoning_trace": trail}
 
     return plan

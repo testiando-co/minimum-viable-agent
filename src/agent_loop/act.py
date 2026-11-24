@@ -1,5 +1,9 @@
 """ACT — ejecutar el plan paso a paso, verificar y decidir si el bucle termina.
 
+ACT ejecuta UN paso por invocación y vuelve a sí mismo mientras queden pasos: así el
+checkpointer guarda el avance después de cada paso (`step_index`, `completed_steps`) y, si un
+paso falla, el grafo se retoma desde ahí sin repetir los anteriores.
+
 Cada paso repite el mismo ciclo del FCoT a menor escala (lo "fractal"):
 - RECAP: qué paso es y para qué sirve.
 - REASON: ejecutarlo. Las herramientas de percepción son deterministas; los pasos de
@@ -72,52 +76,71 @@ def _finish(state: AgentState, update: dict[str, Any]) -> dict[str, Any]:
     return update
 
 
+def _run_step(llm: Optional[Any], state: AgentState, wi: WorkItemData, config: RunnableConfig) -> dict[str, Any]:
+    """Ejecuta el paso `step_index` con su RECAP → REASON → VERIFY y devuelve los cambios."""
+    trace_id, mode, iteration = state["trace_id"], state["mode"], state["iteration"]
+    index = state["step_index"]
+    step = ActionPlan.model_validate(state["action_plan"]).steps[index]
+    level = f"vuelta {iteration} · paso {index + 1}"
+    trail, tools = list(state["reasoning_trace"]), list(state["tools"])
+    observations, draft = list(state["observations"]), state["draft"]
+
+    trail.append(logger.step(trace_id, "RECAP",
+                             f"{step.tool}" + (f"({step.query})" if step.query else "") + f": {step.purpose}", level))
+    problem = invalid_step(mode, step)
+    if problem:
+        status, check = "rechazado", f"paso rechazado: {problem}"
+        trail.append(logger.step(trace_id, "VERIFY", check, level))
+    elif step.tool in ("draft_test_plan", "draft_answer"):
+        draft, detail = _draft(llm, state, observations, config)
+        status, check = "ok", verify_draft(mode, wi, draft)
+        trail += [logger.step(trace_id, "REASON", detail, level), logger.step(trace_id, "VERIFY", check, level)]
+    else:
+        args, result = run_tool(step.tool, state["wi_id"], step.query)
+        tools.append(logger.tool(trace_id, step.tool, args, result))
+        observations.append({"iteration": iteration, "tool": step.tool, "query": step.query, "result": result})
+        status, check = "ok", verify_tool_result(step.tool, result)
+        trail += [logger.step(trace_id, "REASON", f"se ejecutó {step.tool}", level),
+                  logger.step(trace_id, "VERIFY", check, level)]
+
+    done = {"step": index + 1, "tool": step.tool, "query": step.query, "status": status, "verify": check}
+    return {
+        "step_index": index + 1, "completed_steps": state["completed_steps"] + [done],
+        "observations": observations, "draft": draft, "tools": tools, "reasoning_trace": trail,
+    }
+
+
 def make_act(llm: Optional[Any] = None) -> Callable[[AgentState, RunnableConfig], dict[str, Any]]:
-    """Crea el nodo ACT con el LLM indicado para los pasos de redacción."""
+    """Crea el nodo ACT: ejecuta UN paso del plan por invocación.
+
+    Al terminar el nodo, el checkpointer guarda qué pasos se hicieron (`completed_steps`) y cuál
+    sigue (`step_index`). Si un paso falla (p. ej. un 429 del LLM), el grafo se retoma desde ese
+    paso sin repetir los anteriores (ver `graph.run_agent`). En el último paso, ACT comprueba el
+    objetivo y entrega el resultado o deja el feedback para la siguiente vuelta.
+    """
 
     def act(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
-        trace_id, wi_id, mode, iteration = state["trace_id"], state["wi_id"], state["mode"], state["iteration"]
-
         if state["route"] == "not_found":
-            result = dict(NOT_FOUND) if mode == "plan" else NOT_FOUND["error"]
+            result = dict(NOT_FOUND) if state["mode"] == "plan" else NOT_FOUND["error"]
             return _finish(state, {
                 "result": result, "goal_reached": True, "end_reason": "el WI no existe",
                 "details": {"found": False, "grounded": False, "citations": []},
             })
 
         wi = WorkItemData.model_validate(state["work_item"])
-        trail, tools = list(state["reasoning_trace"]), list(state["tools"])
-        observations, draft = list(state["observations"]), None
-        steps = ActionPlan.model_validate(state["action_plan"]).steps
+        total = len(ActionPlan.model_validate(state["action_plan"]).steps)
+        update: dict[str, Any] = _run_step(llm, state, wi, config) if state["step_index"] < total else {}
+        current = {**state, **update}
+        if current["step_index"] < total:
+            return {**update, "goal_reached": False}  # quedan pasos: ACT vuelve a ACT
 
-        for i, step in enumerate(steps, 1):
-            level = f"vuelta {iteration} · paso {i}"
-            trail.append(logger.step(trace_id, "RECAP",
-                                     f"{step.tool}" + (f"({step.query})" if step.query else "") + f": {step.purpose}",
-                                     level))
-            problem = invalid_step(mode, step)
-            if problem:
-                trail.append(logger.step(trace_id, "VERIFY", f"paso rechazado: {problem}", level))
-                continue
-            if step.tool in ("draft_test_plan", "draft_answer"):
-                draft, detail = _draft(llm, state, observations, config)
-                trail.append(logger.step(trace_id, "REASON", detail, level))
-                trail.append(logger.step(trace_id, "VERIFY", verify_draft(mode, wi, draft), level))
-            else:
-                args, result = run_tool(step.tool, wi_id, step.query)
-                tools.append(logger.tool(trace_id, step.tool, args, result))
-                observations.append({"iteration": iteration, "tool": step.tool, "query": step.query, "result": result})
-                trail.append(logger.step(trace_id, "REASON", f"se ejecutó {step.tool}", level))
-                trail.append(logger.step(trace_id, "VERIFY", verify_tool_result(step.tool, result), level))
-
-        outcome = check_goal({**state, "observations": observations}, draft)
-        level = f"vuelta {iteration}"
-        trail += [logger.step(trace_id, "VERIFY", r, level) for r in outcome["rejected"]]
+        # Último paso: VERIFY a nivel de vuelta (¿se alcanzó el objetivo?).
+        trace_id = state["trace_id"]
+        outcome = check_goal(current, current["draft"])
+        level = f"vuelta {state['iteration']}"
+        trail = current["reasoning_trace"] + [logger.step(trace_id, "VERIFY", r, level) for r in outcome["rejected"]]
         trail.append(logger.step(trace_id, "VERIFY", outcome["detail"], level))
-        update: dict[str, Any] = {
-            "observations": observations, "draft": draft, "tools": tools, "reasoning_trace": trail,
-            "goal_reached": outcome["goal_reached"], "feedback": outcome["feedback"],
-        }
+        update.update(reasoning_trace=trail, goal_reached=outcome["goal_reached"], feedback=outcome["feedback"])
         if not outcome["goal_reached"]:
             return update
         for key in ("end_reason", "result", "grounding", "grounded_cases", "details"):
@@ -129,5 +152,10 @@ def make_act(llm: Optional[Any] = None) -> Callable[[AgentState, RunnableConfig]
 
 
 def route_after_act(state: AgentState) -> str:
-    """Objetivo alcanzado (o WI inexistente, o vueltas agotadas) → fin; si no, otra vuelta."""
-    return "end" if state["goal_reached"] else "sense"
+    """Quedan pasos → act; objetivo alcanzado (o WI inexistente, o vueltas agotadas) → fin;
+    si no, otra vuelta → sense."""
+    if state["goal_reached"]:
+        return "end"
+    if state["route"] != "not_found" and state["step_index"] < len(state["action_plan"]["steps"]):
+        return "act"
+    return "sense"

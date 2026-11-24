@@ -9,11 +9,11 @@ cada paso que ejecuta ACT, sigue el Fractal Chain of Thought: RECAP → REASON �
 | sense.py     | Percibir: WI, fuentes, memoria y lo observado        | RECAP           | no             |
 | reason.py    | Interpretar la situación frente al objetivo          | REASON          | sí (Assessment)|
 | plan.py      | Convertir la evaluación en pasos con herramientas    | REASON          | sí (ActionPlan)|
-| act.py       | Ejecutar paso a paso, verificar, entregar o repetir  | RECAP/REASON/VERIFY por paso | solo al redactar |
+| act.py       | Un paso del plan por nodo (checkpoint por paso), verificar, entregar o repetir | RECAP/REASON/VERIFY por paso | solo al redactar |
 | verify.py    | Grounding, confianza y ¿objetivo alcanzado? (reglas) | VERIFY          | no             |
 | tools.py     | Catálogo de herramientas (toolbelt)                  | —               | —              |
 | memory.py    | Corto plazo (en memoria) y largo plazo (Chroma)      | —               | —              |
 | prompts.py   | Instruction Contract y prompts                       | —               | —              |
 | llm.py       | Selección del modelo                                 | —               | —              |
-| graph.py     | Grafo de LangGraph con el bucle act → sense          | —               | —              |
+| graph.py     | Grafo (act ↺ act, act → sense) y reintento desde el checkpoint | —     | —              |
 """

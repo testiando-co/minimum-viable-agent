@@ -18,6 +18,7 @@ Mode = Literal["plan", "question"]
 Route = Literal["not_found", "llm"]
 
 DEFAULT_MAX_ITERATIONS = 3
+MAX_STEPS_PER_PLAN = 8  # tope de pasos por plan (cada paso es un nodo del grafo)
 
 
 def max_iterations() -> int:
@@ -65,6 +66,10 @@ class AgentState(TypedDict, total=False):
     assessment: Optional[dict[str, Any]]      # Assessment
     action_plan: Optional[dict[str, Any]]     # ActionPlan
 
+    # --- Avance dentro de la vuelta (el checkpointer lo guarda después de cada paso) ---------
+    step_index: int                           # siguiente paso del plan a ejecutar
+    completed_steps: list[dict[str, Any]]     # {step, tool, query, status, verify} ya hechos
+
     # --- ACT: lo que se ejecutó y observó -----------------------------------------------
     observations: list[dict[str, Any]]        # {iteration, tool, query, result} de esta ejecución
     draft: Optional[dict[str, Any]]           # último LLMTestPlanDraft o GroundedAnswer
@@ -94,6 +99,6 @@ def new_run(mode: Mode, wi_id: str, question: Optional[str], model: str, session
         trace_id=str(uuid.uuid4()), timestamp=datetime.now(timezone.utc).isoformat(),
         iteration=0, max_iterations=max_iterations(), goal_reached=False, end_reason=None,
         route="llm", work_item=None, problems=[], long_term_memory=[], memory_context="", recap="",
-        assessment=None, action_plan=None, observations=[], draft=None, feedback=[],
+        assessment=None, action_plan=None, step_index=0, completed_steps=[], observations=[], draft=None, feedback=[],
         grounding=None, grounded_cases=[], result=None, details={}, reasoning_trace=[], tools=[],
     )

@@ -71,6 +71,15 @@ def enviar_trazas_al_final():
 
 
 @pytest.fixture(autouse=True)
+def bucle_por_defecto(request, monkeypatch):
+    """Las unitarias no dependen del .env: 3 vueltas máximas y reintentos sin espera."""
+    if request.node.get_closest_marker("llm"):
+        return
+    monkeypatch.setenv("MVA_MAX_ITERATIONS", "3")
+    monkeypatch.setenv("MVA_PLAN_RETRY_DELAY", "0")
+
+
+@pytest.fixture(autouse=True)
 def chroma_temporal(tmp_path, monkeypatch):
     monkeypatch.setenv("MVA_CHROMA_DIR", str(tmp_path / "chroma.db"))
 
