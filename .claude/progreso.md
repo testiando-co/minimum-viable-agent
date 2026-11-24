@@ -81,6 +81,12 @@ recargo" (las reglas verifican la cita, no el sentido del `then_expected`). Una 
 ahora da otra vuelta con feedback en vez de escalar de inmediato (cubierto por tests unitarios; no
 ocurrió en esta corrida).
 
+**Límites del plan gratuito**: los modelos gratis limitan las solicitudes por minuto y por día
+(p. ej. `gemini-3.5-flash-lite` permite unas 15 RPM) y pueden responder 429/503. Con el bucle, cada
+WI usa ≥ 3 llamadas por vuelta: las 5 de aceptación son ~12 llamadas en ~1 min, cerca del límite.
+Una corrida lenta o un 429 suele ser el límite, no un fallo del agente; el límite no cambia la
+calidad de las respuestas (el error del día 30 es del modelo).
+
 Criterio estricto (2026-11-23, 3 corridas por modelo): además de lo que exige `golden_set.json`, el
 caso del día 30 debe decir que **no** se aplica recargo y la trampa 3 debe venir del git diff
 (`GIT_DIFF_DISCREPANCY`). Con la key gratuita: `gemini-3.7-flash` y `3.8-flash` respondieron 503,

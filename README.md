@@ -32,6 +32,13 @@ Se elige solo con `.env`:
 | Ollama local | `LOCAL_LLM=1` + `OLLAMA_MODEL` (p. ej. `gemma4`) y `OLLAMA_EMBEDDINGS_MODEL` (p. ej. `embeddinggemma`) |
 
 Con `LOCAL_LLM=1`, Ollama también genera los embeddings del RAG; si no, se usa FastEmbed local.
+
+**Los modelos gratuitos tienen límites.** El plan gratuito de Gemini limita las solicitudes por
+minuto (RPM) y por día, y en horas de alta demanda puede responder `429` (límite alcanzado) o
+`503` (sobrecarga). Con el bucle del agente cada WI hace al menos 3 llamadas al LLM por vuelta
+(reason, plan y redacción), así que `uv run pytest -v -m llm` hace unas 12 llamadas en un minuto y
+puede rozar el límite; una vuelta extra de autocorrección suma 3 más. Si aparece un `429`, espera
+un minuto o cambia de modelo/API key en `.env`. La CLI muestra el error de forma controlada.
 Los tests `@pytest.mark.llm` corren solo si el proveedor elegido está configurado.
 
 Resultado de las 5 pruebas de aceptación con el modelo real (`uv run pytest -v`):
