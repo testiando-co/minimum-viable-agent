@@ -121,6 +121,10 @@ checkpointer vive en memoria: se retoma dentro del mismo proceso, no después de
 
 La memoria es solo contexto: no es una fuente y el grounding nunca la acepta como cita.
 
+En LangSmith cada operación de memoria es un run (tag `memoria`) dentro de la traza del agente:
+`memoria corto plazo` (los turnos de la sesión que ve el LLM), `memoria largo plazo: recuperar`
+(retriever: las ejecuciones pasadas como documentos) y `memoria largo plazo: guardar`.
+
 **Trazas (LangSmith)**: cada ejecución del agente es un solo `graph.invoke`, así que queda en
 **una sola traza** con los nodos, las herramientas (`@traceable`), el RAG y la llamada al LLM
 anidados. La CLI (`MVA CLI`) y la evaluación (`MVA evaluación`) agrupan todas sus ejecuciones en

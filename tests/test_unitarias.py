@@ -591,8 +591,11 @@ from agent_loop.graph import build_graph, run_agent
 from agent_loop.memory import get_long_term_memory
 
 
-def _traced_runs(run):
-    """Ejecuta `run()` con LangSmith activado contra un cliente simulado y devuelve los runs enviados."""
+def _traced_runs(run, with_outputs=False):
+    """Ejecuta `run()` con LangSmith activado contra un cliente simulado y devuelve los runs enviados.
+
+    Con `with_outputs=True` agrega a cada run las salidas que se enviaron al cerrarlo.
+    """
     from unittest.mock import MagicMock
 
     from langchain_core.tracers.langchain import wait_for_all_tracers
@@ -602,7 +605,16 @@ def _traced_runs(run):
     with tracing_context(enabled=True, client=client, project_name="tests"):
         run()
     wait_for_all_tracers()
-    return [call.kwargs for call in client.create_run.call_args_list]
+    runs = [dict(call.kwargs) for call in client.create_run.call_args_list]
+    if with_outputs:
+        outputs: dict = {}
+        for call in client.update_run.call_args_list:
+            run_id = call.args[0] if call.args else call.kwargs.get("run_id")
+            if call.kwargs.get("outputs"):
+                outputs.setdefault(run_id, call.kwargs["outputs"])
+        for r in runs:
+            r["outputs"] = outputs.get(r.get("id")) or r.get("outputs")
+    return runs
 
 
 def test_los_tests_unitarios_no_envian_trazas(fake_index, monkeypatch):
@@ -638,6 +650,20 @@ def test_una_ejecucion_produce_una_sola_traza(fake_index):
     names = {r["name"] for r in runs}
     assert {"sense", "reason", "plan", "act"} <= names                    # nodos del grafo
     assert {"fetch_tfs_and_git_data", "search_meet_transcript_rag"} <= names  # herramientas anidadas
+
+
+def test_la_memoria_aparece_en_la_traza(fake_index):
+    session = str(uuid.uuid4())
+    generate_test_plan("WI-4052", llm=FakeStructuredLLM(_good_responder), session_id=session)
+    runs = _traced_runs(lambda: generate_test_plan("WI-4052", llm=FakeStructuredLLM(_good_responder),
+                                                   session_id=session), with_outputs=True)
+    by_name = {r["name"]: r for r in runs}
+    assert {"memoria corto plazo", "memoria largo plazo: recuperar", "memoria largo plazo: guardar"} <= by_name.keys()
+    assert len({r["trace_id"] for r in runs}) == 1  # dentro de la misma traza del agente
+    recall = by_name["memoria largo plazo: recuperar"]
+    assert "self" not in recall["inputs"] and "WI-4052" in recall["inputs"]["query"]
+    docs = recall["outputs"]["documents"]  # la ejecución anterior, como documento recuperado
+    assert docs and "READY_FOR_QA" in docs[0]["page_content"] and docs[0]["metadata"]["wi_id"] == "WI-4052"
 
 
 def test_la_cli_agrupa_todos_los_wi_en_una_traza(fake_index, monkeypatch):

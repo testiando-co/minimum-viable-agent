@@ -6,6 +6,10 @@
 - Largo plazo (Chroma): al terminar cada ejecución se guarda un resumen en la colección
   `mva_long_term_memory` de chroma.db/; en SENSE se recuperan las ejecuciones pasadas más
   parecidas. Es solo contexto: nunca cuenta como fuente para el grounding.
+
+En LangSmith cada operación de memoria es un run dentro de la traza del agente:
+`memoria corto plazo` (turnos de la sesión), `memoria largo plazo: recuperar` (retriever) y
+`memoria largo plazo: guardar`.
 """
 
 import os
@@ -16,6 +20,7 @@ from typing import Any, Optional
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langgraph.checkpoint.memory import InMemorySaver
+from langsmith import traceable
 
 from tools_and_rag import chroma_client, chroma_dir, chroma_where, get_embeddings
 
@@ -28,6 +33,11 @@ SHORT_TERM_CHECKPOINTER = InMemorySaver()
 SESSION_ID = str(uuid.uuid4())  # una sesión por proceso (p. ej. una ejecución del CLI)
 
 
+def _without_self(inputs: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in inputs.items() if k != "self"}
+
+
+@traceable(name="memoria corto plazo", run_type="chain", tags=["memoria"])
 def recent_turns(history: list[dict[str, Any]], n: int = SHORT_TERM_TURNS) -> list[dict[str, Any]]:
     return history[-n:]
 
@@ -60,6 +70,8 @@ class LongTermMemory:
             client=chroma_client(persist_directory),
         )
 
+    @traceable(name="memoria largo plazo: guardar", run_type="tool", tags=["memoria"],
+               process_inputs=_without_self)
     def save(self, turn: dict[str, Any]) -> str:
         text = (f"{turn['mode']} sobre {turn['wi_id']}: {turn['request']}. "
                 f"Resultado: {turn['outcome']}")
@@ -67,6 +79,12 @@ class LongTermMemory:
         self.store.add_documents([Document(page_content=text, metadata=metadata)], ids=[turn["trace_id"]])
         return turn["trace_id"]
 
+    @traceable(name="memoria largo plazo: recuperar", run_type="retriever", tags=["memoria"],
+               process_inputs=_without_self,
+               process_outputs=lambda recalled: {"documents": [
+                   {"page_content": m["memory"], "type": "Document",
+                    "metadata": {k: v for k, v in m.items() if k != "memory"}}
+                   for m in recalled]})
     def recall(self, query: str, k: int = LONG_TERM_K, where: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
         if self.store._collection.count() == 0:
             return []

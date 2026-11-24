@@ -56,6 +56,8 @@ la guía.
   que exista"), sin agregar el texto del LLM.
 - La memoria es solo contexto: nunca es fuente ni se acepta como cita en el grounding.
 - Los nodos que llaman al LLM pasan el `config` del grafo; si no, LangSmith abre otra traza.
+- La memoria se ve en LangSmith con `@traceable` (tag `memoria`): `memoria corto plazo`,
+  `memoria largo plazo: recuperar` (retriever, salida como documentos) y `... : guardar`.
 - El estado del grafo guarda solo dicts/listas (serializables por el checkpointer).
 - Anthropic con Opus 5.5 requiere `method="json_schema"` (rechaza el *forced tool calling*).
 - Tests unitarios (`tests/test_unitarias.py`) con LLM simulado (`FakeStructuredLLM`), embeddings
